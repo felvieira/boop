@@ -1,4 +1,4 @@
-// Thin typed client for the Boop API. Admin endpoints are unauthenticated in v1.
+// Thin typed client for the Boop API. Support endpoints require configured admin auth.
 
 export type Level = 'info' | 'success' | 'warning' | 'error' | 'critical'
 export const LEVELS: Level[] = ['info', 'success', 'warning', 'error', 'critical']
@@ -130,6 +130,18 @@ export interface Status {
   }
 }
 
+export type SupportStatus = 'new' | 'in_progress' | 'blocked' | 'done'
+export interface SupportAttachment { id: string; filename: string; content_type: string; created_at: string }
+export interface SupportCard {
+  id: string; source_account: string; source_thread_id: string; source_message_id: string
+  product: string; title: string; sender: string; reported_at: string; original_text: string
+  status: SupportStatus; created_at: string; updated_at: string; attachments: SupportAttachment[]
+}
+export interface SupportCardInput {
+  source_account: string; source_thread_id: string; source_message_id: string
+  product: string; title: string; sender: string; reported_at: string; original_text: string
+}
+
 export interface AuthState {
   auth_required: boolean
   authenticated: boolean
@@ -179,6 +191,22 @@ export function setLoginHandler(fn: () => void) {
 
 export const api = {
   me: () => request<AuthState>('GET', '/api/v1/auth/me'),
+  supportCards: () => request<{ cards: SupportCard[] }>('GET', '/api/v1/support/cards'),
+  setSupportCardStatus: (id: string, status: SupportStatus) => request<SupportCard>('PATCH', `/api/v1/support/cards/${encodeURIComponent(id)}/status`, { status }),
+  upsertSupportCard: async (input: SupportCardInput, files: File[] = []) => {
+    const form = new FormData()
+    form.set('metadata', JSON.stringify(input))
+    for (const file of files) form.append('attachments', file, file.name)
+    const res = await fetch('/api/v1/support/cards/upsert', { method: 'POST', body: form })
+    const text = await res.text()
+    let parsed: any = null
+    try { parsed = text ? JSON.parse(text) : null } catch { /* handled below */ }
+    if (!res.ok) {
+      if (res.status === 401 && parsed?.error === 'login_required') onLoginRequired?.()
+      throw new ApiError(res.status, parsed?.error ?? 'error', parsed?.message ?? `Request failed (${res.status})`)
+    }
+    return parsed as SupportCard
+  },
   login: (username: string, password: string) => request<AuthState>('POST', '/api/v1/auth/login', { username, password }),
   logout: () => request<void>('POST', '/api/v1/auth/logout'),
 

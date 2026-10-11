@@ -3,10 +3,12 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -25,6 +27,7 @@ import (
 	"github.com/chrisgreg/boop/server/internal/projects"
 	"github.com/chrisgreg/boop/server/internal/settings"
 	"github.com/chrisgreg/boop/server/internal/silences"
+	"github.com/chrisgreg/boop/server/internal/support"
 )
 
 // fakeSender records notifications instead of talking to APNs.
@@ -73,6 +76,7 @@ func newEnv(t *testing.T) *env {
 		Pairing:    pairing.New(db, dev),
 		Events:     events.New(db),
 		Silences:   silences.New(db),
+		Support:    support.New(db),
 		Dispatcher: delivery.New(db, dev, sender, log),
 		Admin:      auth.NewAdmin("", ""),
 		StartedAt:  time.Now(),
@@ -1266,5 +1270,114 @@ func TestMCPEndpointAuth(t *testing.T) {
 	e.server.Config.MCPToken = "boop_mcp_test_token_1234"
 	if r := e.do("GET", "/api/v1/settings", "", nil); r.body["mcp_token_set"] != true || strings.Contains(string(r.raw), "boop_mcp_test_token_1234") {
 		t.Errorf("token flag must be reported without the token: %s", r.raw)
+	}
+}
+
+func TestSupportCardsPrivateAndDeduplicated(t *testing.T) {
+	e := newEnv(t)
+	if r := e.do("GET", "/api/v1/support/cards", "", nil); r.status != http.StatusServiceUnavailable || r.body["error"] != "support_auth_required" {
+		t.Fatalf("support board must remain locked when admin auth is disabled: %d %s", r.status, r.raw)
+	}
+	e.server.Config.SupportIngestToken = "synthetic-support-ingest-token-0123456789abcdef"
+	e.server.Admin = auth.NewAdmin("synthetic-user", "synthetic-password")
+	if r := e.do("GET", "/api/v1/support/cards", e.server.Config.SupportIngestToken, nil); r.status != http.StatusForbidden {
+		t.Fatalf("support ingestion token must not read cards: %d %s", r.status, r.raw)
+	}
+	if r := e.do("PATCH", "/api/v1/support/cards/sup_synthetic/status", e.server.Config.SupportIngestToken, map[string]string{"status": "done"}); r.status != http.StatusForbidden {
+		t.Fatalf("support ingestion token must not change status: %d %s", r.status, r.raw)
+	}
+	if r := e.do("GET", "/api/v1/support/cards", "", nil); r.status != http.StatusUnauthorized {
+		t.Fatalf("admin credentials should be required: %d %s", r.status, r.raw)
+	}
+
+	input := map[string]string{
+		"source_account": "support@example.test", "source_thread_id": "thread-synth-1", "source_message_id": "message-synth-1",
+		"product": "Boop", "title": "Synthetic image upload", "sender": "Customer Example <customer@example.test>",
+		"reported_at": "2026-10-11T12:00:00Z", "original_text": "Synthetic report body; no customer data.",
+	}
+	metadata, _ := json.Marshal(input)
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("metadata", string(metadata))
+	file, err := writer.CreateFormFile("attachments", "synthetic.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This fixture is a valid synthetic 1x1 PNG.
+	pngData, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/4WcAAAAASUVORK5CYII=")
+	if _, err = file.Write(pngData); err != nil {
+		t.Fatal(err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+"/api/v1/support/cards/upsert", &body)
+	req.Header.Set("Authorization", "Bearer "+e.server.Config.SupportIngestToken)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(res.Body)
+	_ = res.Body.Close()
+	var first map[string]any
+	_ = json.Unmarshal(raw, &first)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("upsert: %d %s", res.StatusCode, raw)
+	}
+	cardID := first["id"].(string)
+	att := first["attachments"].([]any)
+	if len(att) != 1 || att[0].(map[string]any)["content_type"] != "image/png" {
+		t.Fatalf("attachment metadata = %v", att)
+	}
+
+	// Replaying the same Gmail identity updates the original text on one card.
+	input["original_text"] = "Updated synthetic report body."
+	body.Reset()
+	writer = multipart.NewWriter(&body)
+	metadata, _ = json.Marshal(input)
+	_ = writer.WriteField("metadata", string(metadata))
+	_ = writer.Close()
+	req, _ = http.NewRequest(http.MethodPost, e.srv.URL+"/api/v1/support/cards/upsert", &body)
+	req.Header.Set("Authorization", "Bearer "+e.server.Config.SupportIngestToken)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = io.ReadAll(res.Body)
+	_ = res.Body.Close()
+	var replay map[string]any
+	_ = json.Unmarshal(raw, &replay)
+	if res.StatusCode != http.StatusOK || replay["id"] != cardID || replay["original_text"] != "Updated synthetic report body." || len(replay["attachments"].([]any)) != 1 {
+		t.Fatalf("idempotent replay: %d %s", res.StatusCode, raw)
+	}
+
+	req, _ = http.NewRequest(http.MethodPatch, e.srv.URL+"/api/v1/support/cards/"+cardID+"/status", strings.NewReader(`{"status":"in_progress"}`))
+	req.SetBasicAuth("synthetic-user", "synthetic-password")
+	req.Header.Set("Content-Type", "application/json")
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = io.ReadAll(res.Body)
+	_ = res.Body.Close()
+	var moved map[string]any
+	_ = json.Unmarshal(raw, &moved)
+	if res.StatusCode != http.StatusOK || moved["status"] != "in_progress" {
+		t.Fatalf("status change: %d %s", res.StatusCode, raw)
+	}
+
+	attachmentID := att[0].(map[string]any)["id"].(string)
+	req, _ = http.NewRequest(http.MethodGet, e.srv.URL+"/api/v1/support/cards/"+cardID+"/attachments/"+attachmentID, nil)
+	req.SetBasicAuth("synthetic-user", "synthetic-password")
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(res.Body)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK || res.Header.Get("Cache-Control") != "private, no-store" || res.Header.Get("X-Content-Type-Options") != "nosniff" || !strings.HasPrefix(res.Header.Get("Content-Type"), "image/png") || len(data) == 0 {
+		t.Fatalf("private attachment response: %d %v", res.StatusCode, res.Header)
 	}
 }

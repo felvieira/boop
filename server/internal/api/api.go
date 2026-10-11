@@ -2,18 +2,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
-	"net/http"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
 	"github.com/chrisgreg/boop/server/internal/apns"
 	"github.com/chrisgreg/boop/server/internal/auth"
 	"github.com/chrisgreg/boop/server/internal/config"
@@ -27,8 +21,22 @@ import (
 	"github.com/chrisgreg/boop/server/internal/projects"
 	"github.com/chrisgreg/boop/server/internal/settings"
 	"github.com/chrisgreg/boop/server/internal/silences"
+	"github.com/chrisgreg/boop/server/internal/support"
 	"github.com/chrisgreg/boop/server/internal/webpush"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+	"io"
+	"log/slog"
+	"net/http"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
 )
+
 // Version is the server version, overridden at build time via -ldflags.
 var Version = "1.3.0"
 
@@ -43,12 +51,13 @@ type Server struct {
 	Pairing    *pairing.Store
 	Events     *events.Store
 	Silences   *silences.Store
+	Support    *support.Store
 	Dispatcher *delivery.Dispatcher
-	APNS       *apns.Client // nil when not configured
-	APNSError  string       // why APNS is nil
+	APNS       *apns.Client    // nil when not configured
+	APNSError  string          // why APNS is nil
 	WebPush    *webpush.Client // nil when not configured
 	EventHub   *EventHub
-	Admin      *auth.Admin  // web UI / admin API login; open when not enabled
+	Admin      *auth.Admin // web UI / admin API login; open when not enabled
 	StartedAt  time.Time
 	Web        http.Handler
 }
@@ -148,6 +157,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/settings", s.adminAuth(s.getSettings))
 	mux.Handle("PATCH /api/v1/settings", s.adminAuth(s.updateSettings))
 	mux.Handle("POST /api/v1/test", s.adminAuth(s.testNotification))
+
+	// Email support cards and their private image attachments. These require
+	// configured admin auth even if the rest of Boop is deployed open.
+	mux.Handle("GET /api/v1/support/cards", s.supportAuth(s.listSupportCards))
+	mux.Handle("POST /api/v1/support/cards/upsert", s.supportIngestAuth(s.upsertSupportCard))
+	mux.Handle("PATCH /api/v1/support/cards/{id}/status", s.supportAuth(s.setSupportCardStatus))
+	mux.Handle("GET /api/v1/support/cards/{id}/attachments/{attachment_id}", s.supportAuth(s.getSupportAttachment))
 
 	// MCP (read-only) for AI agents: Streamable HTTP at /mcp.
 	mux.Handle("/mcp", s.mcpAuth(mcp.Handler(mcp.NewServer(mcp.Stores{Projects: s.Projects, Events: s.Events}, Version), s.Log)))
@@ -306,6 +322,50 @@ func (s *Server) adminAuth(next http.HandlerFunc) http.Handler {
 	})
 }
 
+// supportAuth requires the existing admin login to be configured and authenticated.
+// Keeping support data closed when admin auth is disabled prevents a deployment
+// that relies only on its reverse proxy from accidentally publishing customer mail.
+func (s *Server) supportAuth(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Add("Vary", "Cookie")
+		w.Header().Add("Vary", "Authorization")
+		if s.Support == nil {
+			writeError(w, http.StatusServiceUnavailable, "support_unavailable", "support storage is unavailable")
+			return
+		}
+		if s.Admin == nil || !s.Admin.Enabled() {
+			writeError(w, http.StatusServiceUnavailable, "support_auth_required", "configure BOOP_ADMIN_USER and BOOP_ADMIN_PASSWORD to enable the private support board")
+			return
+		}
+		s.adminAuth(next).ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) supportIngestAuth(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Add("Vary", "Authorization")
+		if s.Support == nil {
+			writeError(w, http.StatusServiceUnavailable, "support_unavailable", "support storage is unavailable")
+			return
+		}
+		if credential := auth.Bearer(r); credential != "" {
+			if s.Config.SupportIngestToken != "" && auth.Equal(auth.Hash(credential), auth.Hash(s.Config.SupportIngestToken)) {
+				next(w, r)
+				return
+			}
+			writeError(w, http.StatusUnauthorized, "invalid_support_token", "a valid support-ingest token is required")
+			return
+		}
+		if s.Admin == nil || !s.Admin.Enabled() {
+			writeError(w, http.StatusServiceUnavailable, "support_auth_required", "configure BOOP_SUPPORT_INGEST_TOKEN or the Boop admin login to ingest support cards")
+			return
+		}
+		s.adminAuth(next).ServeHTTP(w, r)
+	})
+}
+
 // ---- admin session ----
 
 func (s *Server) authMe(w http.ResponseWriter, r *http.Request) {
@@ -408,7 +468,7 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 // fail maps domain errors to HTTP responses.
 func (s *Server) fail(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, projects.ErrNotFound), errors.Is(err, events.ErrNotFound), errors.Is(err, devices.ErrNotFound), errors.Is(err, pairing.ErrNotFound), errors.Is(err, silences.ErrNotFound):
+	case errors.Is(err, projects.ErrNotFound), errors.Is(err, events.ErrNotFound), errors.Is(err, devices.ErrNotFound), errors.Is(err, pairing.ErrNotFound), errors.Is(err, silences.ErrNotFound), errors.Is(err, support.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, projects.ErrInvalid), errors.Is(err, events.ErrInvalid), errors.Is(err, devices.ErrInvalid), errors.Is(err, silences.ErrInvalid):
 		writeError(w, http.StatusUnprocessableEntity, "invalid", err.Error())
@@ -1136,7 +1196,7 @@ func (s *Server) subscribeWebPush(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			s.fail(w, err)
 			return
- 		}
+		}
 		s.Log.Info("webpush.updated", "device_id", updated.ID)
 		writeJSON(w, http.StatusOK, map[string]any{"device": updated})
 		return
@@ -1175,4 +1235,130 @@ func (s *Server) unsubscribeWebPush(w http.ResponseWriter, r *http.Request) {
 		_ = s.Devices.DeleteByToken(r.Context(), in.Endpoint)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- email support cards ----
+
+type supportCardInput struct {
+	SourceAccount   string `json:"source_account"`
+	SourceThreadID  string `json:"source_thread_id"`
+	SourceMessageID string `json:"source_message_id"`
+	Product         string `json:"product"`
+	Title           string `json:"title"`
+	Sender          string `json:"sender"`
+	ReportedAt      string `json:"reported_at"`
+	OriginalText    string `json:"original_text"`
+}
+
+func (s *Server) listSupportCards(w http.ResponseWriter, r *http.Request) {
+	cards, err := s.Support.List(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"cards": cards})
+}
+
+// upsertSupportCard accepts multipart/form-data with a JSON metadata field and
+// optional image files. The identity tuple makes Gmail retries idempotent.
+func (s *Server) upsertSupportCard(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
+	if err := r.ParseMultipartForm(2 << 20); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "too_large", "request body must be 8 MB or smaller")
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid_multipart", "expected multipart form with metadata and image attachments")
+		}
+		return
+	}
+	var in supportCardInput
+	if err := json.Unmarshal([]byte(r.FormValue("metadata")), &in); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "metadata must be a JSON object")
+		return
+	}
+	parts := r.MultipartForm.File["attachments"]
+	files := make([]support.Attachment, 0, len(parts))
+	var total int64
+	for _, part := range parts {
+		if total+part.Size > 7<<20 {
+			writeError(w, http.StatusRequestEntityTooLarge, "too_large", "image attachments must total 7 MB or less")
+			return
+		}
+		total += part.Size
+		f, err := part.Open()
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_attachment", "could not open attachment")
+			return
+		}
+		data, readErr := io.ReadAll(io.LimitReader(f, 7<<20))
+		_ = f.Close()
+		if readErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_attachment", "could not read attachment")
+			return
+		}
+		_, format, decodeErr := image.DecodeConfig(bytes.NewReader(data))
+		contentTypes := map[string]string{"png": "image/png", "jpeg": "image/jpeg", "gif": "image/gif"}
+		contentType := contentTypes[format]
+		if decodeErr != nil || contentType == "" {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_attachment", "only valid PNG, JPEG, and GIF images are accepted")
+			return
+		}
+		filename := filepath.Base(strings.ReplaceAll(part.Filename, string(rune(92)), "/"))
+		if filename == "." || filename == "" || len(filename) > 180 {
+			filename = "attachment"
+		}
+		files = append(files, support.Attachment{Filename: filename, ContentType: contentType, Content: data})
+	}
+	card, err := s.Support.Upsert(r.Context(), support.Input{
+		SourceAccount: in.SourceAccount, SourceThreadID: in.SourceThreadID, SourceMessageID: in.SourceMessageID,
+		Product: in.Product, Title: in.Title, Sender: in.Sender, ReportedAt: in.ReportedAt, OriginalText: in.OriginalText,
+	}, files)
+	if errors.Is(err, support.ErrInvalid) {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_support_card", "required email identity, product, title, original text, or timestamp is invalid")
+		return
+	}
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, card)
+}
+
+func (s *Server) setSupportCardStatus(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Status string `json:"status"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	card, err := s.Support.SetStatus(r.Context(), r.PathValue("id"), in.Status)
+	if errors.Is(err, support.ErrInvalid) {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_status", "status must be new, in_progress, blocked, or done")
+		return
+	}
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, card)
+}
+
+func (s *Server) getSupportAttachment(w http.ResponseWriter, r *http.Request) {
+	cardID := r.PathValue("id")
+	if _, err := s.Support.Get(r.Context(), cardID); err != nil {
+		s.fail(w, err)
+		return
+	}
+	attachment, err := s.Support.Attachment(r.Context(), cardID, r.PathValue("attachment_id"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", attachment.ContentType)
+	w.Header().Set("Content-Disposition", `inline; filename="image"`)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(attachment.Content)
 }

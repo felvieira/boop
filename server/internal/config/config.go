@@ -27,7 +27,10 @@ type Config struct {
 	// MCP endpoint (/mcp). Device credentials and admin logins work there too.
 	MCPToken string
 
-	APNS APNS
+	// SupportIngestToken grants write-only access to POST /api/v1/support/cards/upsert.
+	SupportIngestToken string
+
+	APNS    APNS
 	WebPush WebPush
 }
 
@@ -74,14 +77,15 @@ func (a APNS) Missing() []string {
 // Load reads configuration from the environment, applying defaults.
 func Load() (Config, error) {
 	c := Config{
-		Port:          8080,
-		BaseURL:       env("BOOP_BASE_URL", ""),
-		DatabasePath:  env("BOOP_DATABASE_PATH", "/data/boop.db"),
-		RetentionDays: 90,
-		LogLevel:      env("BOOP_LOG_LEVEL", "info"),
-		AdminUser:     env("BOOP_ADMIN_USER", ""),
-		AdminPassword: env("BOOP_ADMIN_PASSWORD", ""),
-		MCPToken:      strings.TrimSpace(env("BOOP_MCP_TOKEN", "")),
+		Port:               8080,
+		BaseURL:            env("BOOP_BASE_URL", ""),
+		DatabasePath:       env("BOOP_DATABASE_PATH", "/data/boop.db"),
+		RetentionDays:      90,
+		LogLevel:           env("BOOP_LOG_LEVEL", "info"),
+		AdminUser:          env("BOOP_ADMIN_USER", ""),
+		AdminPassword:      env("BOOP_ADMIN_PASSWORD", ""),
+		MCPToken:           strings.TrimSpace(env("BOOP_MCP_TOKEN", "")),
+		SupportIngestToken: strings.TrimSpace(env("BOOP_SUPPORT_INGEST_TOKEN", "")),
 		APNS: APNS{
 			TeamID:         env("APNS_TEAM_ID", ""),
 			KeyID:          env("APNS_KEY_ID", ""),
@@ -120,6 +124,9 @@ func Load() (Config, error) {
 	}
 	if c.MCPToken != "" && len(c.MCPToken) < 16 {
 		return c, fmt.Errorf("BOOP_MCP_TOKEN must be at least 16 characters")
+	}
+	if c.SupportIngestToken != "" && len(c.SupportIngestToken) < 32 {
+		return c, fmt.Errorf("BOOP_SUPPORT_INGEST_TOKEN must be at least 32 characters")
 	}
 	if c.APNS.Environment != "production" && c.APNS.Environment != "sandbox" {
 		return c, fmt.Errorf("APNS_ENVIRONMENT must be production or sandbox, got %q", c.APNS.Environment)

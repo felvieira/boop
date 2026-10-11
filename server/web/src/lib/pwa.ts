@@ -100,10 +100,12 @@ export async function subscribeToWebPush(): Promise<{ success: boolean; error?: 
       return { success: false, error: 'Server does not have Web Push VAPID key configured' }
     }
 
-    const appServerKey = urlBase64ToUint8Array(vapidResp.public_key)
+    const decodedAppServerKey = urlBase64ToUint8Array(vapidResp.public_key)
+    const appServerKey = new Uint8Array(decodedAppServerKey.byteLength)
+    appServerKey.set(decodedAppServerKey)
     const subscription = await reg.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: appServerKey,
+      applicationServerKey: appServerKey.buffer,
     })
 
     const ua = navigator.userAgent
@@ -181,12 +183,12 @@ export function connectLiveEventStream(onEvent: (event: Event) => void): () => v
           es = null
         }
         if (!stopped) {
-          reconnectTimer = setTimeout(connect, 3000)
+          reconnectTimer = window.setTimeout(connect, 3000)
         }
       }
     } catch {
       if (!stopped) {
-        reconnectTimer = setTimeout(connect, 5000)
+        reconnectTimer = window.setTimeout(connect, 5000)
       }
     }
   }
@@ -195,7 +197,7 @@ export function connectLiveEventStream(onEvent: (event: Event) => void): () => v
 
   return () => {
     stopped = true
-    clearTimeout(reconnectTimer)
+    window.clearTimeout(reconnectTimer)
     if (es) {
       es.close()
       es = null

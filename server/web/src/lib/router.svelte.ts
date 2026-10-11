@@ -2,7 +2,7 @@
 // unknown path, so deep links work.
 
 export interface Route {
-  name: 'inbox' | 'event' | 'group' | 'projects' | 'devices' | 'settings' | 'setup' | 'notfound'
+  name: 'inbox' | 'event' | 'group' | 'projects' | 'devices' | 'settings' | 'support' | 'setup' | 'notfound'
   params: Record<string, string>
 }
 
@@ -16,6 +16,7 @@ function parse(path: string): Route {
   if (p === '/projects') return { name: 'projects', params: {} }
   if (p === '/devices') return { name: 'devices', params: {} }
   if (p === '/settings') return { name: 'settings', params: {} }
+  if (p === '/support') return { name: 'support', params: {} }
   if (p === '/setup') return { name: 'setup', params: {} }
   return { name: 'notfound', params: {} }
 }

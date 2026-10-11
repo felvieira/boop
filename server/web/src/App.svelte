@@ -13,6 +13,7 @@
   import Settings from './pages/Settings.svelte'
   import Setup from './pages/Setup.svelte'
   import Login from './pages/Login.svelte'
+  import SupportBoard from './pages/SupportBoard.svelte'
   import { pageIn } from './lib/motion'
   import { playBoopSound, connectLiveEventStream, subscribeToWebPush, isSubscribedToPush, registerServiceWorker } from './lib/pwa'
   let setupCompleted = $state<boolean | null>(null)
@@ -50,8 +51,8 @@
     const disconnectStream = connectLiveEventStream((e) => {
       playBoopSound()
       toastEvent = e
-      clearTimeout(toastTimer)
-      toastTimer = setTimeout(() => {
+      window.clearTimeout(toastTimer)
+      toastTimer = window.setTimeout(() => {
         toastEvent = null
       }, 7000)
       window.dispatchEvent(new CustomEvent('boop:new_event', { detail: e }))
@@ -59,7 +60,7 @@
     const t = setInterval(boot, 60_000)
     return () => {
       clearInterval(t)
-      clearTimeout(toastTimer)
+      window.clearTimeout(toastTimer)
       disconnectStream()
     }
   })
@@ -83,6 +84,7 @@
     { label: 'Projects', href: '/projects' },
     { label: 'Devices', href: '/devices' },
     { label: 'Settings', href: '/settings' },
+    { label: 'Support', href: '/support' },
   ]
   const activeTab = $derived(route.name === 'event' || route.name === 'group' ? '/' : router.path)
 </script>
@@ -153,6 +155,8 @@
           <Devices />
         {:else if route.name === 'settings'}
           <Settings />
+        {:else if route.name === 'support'}
+          <SupportBoard />
         {:else}
           <p class="muted">Nothing here. <a href="/" onclick={link}>Back to the inbox</a>.</p>
         {/if}

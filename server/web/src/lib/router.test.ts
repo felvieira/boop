@@ -7,6 +7,7 @@ describe('parseRoute', () => {
     expect(parseRoute('/events/evt_abc')).toEqual({ name: 'event', params: { id: 'evt_abc' } })
     expect(parseRoute('/projects/')).toEqual({ name: 'projects', params: {} })
     expect(parseRoute('/settings')).toEqual({ name: 'settings', params: {} })
+    expect(parseRoute('/support')).toEqual({ name: 'support', params: {} })
     expect(parseRoute('/setup')).toEqual({ name: 'setup', params: {} })
     expect(parseRoute('/nope').name).toBe('notfound')
   })
