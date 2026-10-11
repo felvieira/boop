@@ -169,6 +169,9 @@ func (s *Server) ingestOne(ctx context.Context, p projects.Project, in events.In
 	if silenced := s.applySilence(ctx, &e); !silenced {
 		s.Dispatcher.Enqueue(e, p)
 	}
+	if s.EventHub != nil {
+		s.EventHub.Publish(e)
+	}
 	return true
 }
 

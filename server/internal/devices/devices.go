@@ -122,7 +122,7 @@ func (s *Store) Register(ctx context.Context, id string, in Registration) (Devic
 		if t == "" {
 			d.DeviceToken = nil
 		} else {
-			if len(t) > 512 {
+			if len(t) > 4096 {
 				return Device{}, fmt.Errorf("%w: device_token is too long", ErrInvalid)
 			}
 			if _, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE device_token = ? AND id <> ?`, t, d.ID); err != nil {
@@ -196,4 +196,14 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// DeleteByToken removes devices whose token matches tokenMatch (e.g. matching web push endpoint).
+func (s *Store) DeleteByToken(ctx context.Context, tokenMatch string) error {
+	tokenMatch = strings.TrimSpace(tokenMatch)
+	if tokenMatch == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE device_token LIKE ?`, "%"+tokenMatch+"%")
+	return err
 }

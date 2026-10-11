@@ -28,6 +28,14 @@ type Config struct {
 	MCPToken string
 
 	APNS APNS
+	WebPush WebPush
+}
+
+// WebPush holds VAPID credentials for Web Push (PWA).
+type WebPush struct {
+	VAPIDPublicKey  string
+	VAPIDPrivateKey string
+	Subject         string
 }
 
 // APNS holds Apple Push Notification service credentials.
@@ -81,6 +89,11 @@ func Load() (Config, error) {
 			PrivateKeyPath: env("APNS_PRIVATE_KEY_PATH", ""),
 			PrivateKey:     env("APNS_PRIVATE_KEY", ""),
 			Environment:    env("APNS_ENVIRONMENT", "production"),
+		},
+		WebPush: WebPush{
+			VAPIDPublicKey:  env("VAPID_PUBLIC_KEY", ""),
+			VAPIDPrivateKey: env("VAPID_PRIVATE_KEY", ""),
+			Subject:         env("VAPID_SUBJECT", "mailto:admin@boop.local"),
 		},
 	}
 	if v := os.Getenv("BOOP_PORT"); v != "" {

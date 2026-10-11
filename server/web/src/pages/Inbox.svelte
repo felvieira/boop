@@ -75,6 +75,20 @@
       clearInterval(tick)
     }
   })
+  $effect(() => {
+    const handleNew = (evt: globalThis.Event) => {
+      const e = (evt as CustomEvent<Event>).detail
+      if (!e || typeof e.id !== 'string') return
+      if (!project || project === e.project_id) {
+        if (!level || level === e.level) {
+          events = [e, ...events.filter((x) => x.id !== e.id)]
+          now = new Date()
+        }
+      }
+    }
+    window.addEventListener('boop:new_event', handleNew)
+    return () => window.removeEventListener('boop:new_event', handleNew)
+  })
 
   const groups = $derived.by(() => {
     const out: { label: string; items: Event[] }[] = []

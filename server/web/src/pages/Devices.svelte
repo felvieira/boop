@@ -10,8 +10,10 @@
   import CodeBlock from '../lib/ui/CodeBlock.svelte'
   import { panel, soft, pop, reorder } from '../lib/motion'
   import Skeleton from '../lib/ui/Skeleton.svelte'
+  import { isSubscribedToPush, subscribeToWebPush, unsubscribeFromWebPush } from '../lib/pwa'
 
   let { embedded = false, onpaired }: { embedded?: boolean; onpaired?: () => void } = $props()
+  let pushSubscribed = $state(false)
 
   let devices = $state<Device[]>([])
   let loaded = $state(false)
@@ -31,6 +33,25 @@
     }
   }
 
+  async function togglePush() {
+    error = ''
+    try {
+      if (pushSubscribed) {
+        await unsubscribeFromWebPush()
+        pushSubscribed = false
+      } else {
+        const res = await subscribeToWebPush()
+        if (res.success) {
+          pushSubscribed = true
+          await load()
+        } else if (res.error) {
+          error = res.error
+        }
+      }
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : 'Falha na inscrição push'
+    }
+  }
   async function startPairing() {
     error = ''
     try {
@@ -61,7 +82,7 @@
 
   $effect(() => {
     load()
-    // While a QR is showing, poll so the new phone appears as soon as it pairs.
+    isSubscribedToPush().then((v) => (pushSubscribed = v))
     const t = setInterval(async () => {
       const before = devices.length
       await load()
@@ -80,6 +101,26 @@
 
 <div class="stack">
   {#if error}<div transition:panel><Notice tone="bad">{error}</Notice></div>{/if}
+
+  <Card title="PWA / Web Push">
+    {#snippet action()}
+      {#if pushSubscribed}
+        <Button variant="secondary" size="sm" onclick={togglePush}>Desativar Push</Button>
+      {:else}
+        <Button size="sm" onclick={togglePush}>Ativar Push neste Navegador</Button>
+      {/if}
+    {/snippet}
+    <p class="secondary lead" in:soft>
+      Instale o Boop como PWA (no iOS: Safari &gt; Compartilhar &gt; Adicionar à Tela de Início; no Android/Chrome: Instalar App) para receber notificações nativas em segundo plano mesmo com o app fechado.
+    </p>
+    <div style="margin-top: 10px">
+      {#if pushSubscribed}
+        <StatusDot tone="ok">Notificações push ativas neste navegador</StatusDot>
+      {:else}
+        <StatusDot tone="warn">Notificações push desativadas neste navegador</StatusDot>
+      {/if}
+    </div>
+  </Card>
 
   <Card title="Pair iPhone">
     {#snippet action()}

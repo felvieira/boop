@@ -27,6 +27,7 @@ import (
 	"github.com/chrisgreg/boop/server/internal/settings"
 	"github.com/chrisgreg/boop/server/internal/silences"
 	"github.com/chrisgreg/boop/server/internal/web"
+	"github.com/chrisgreg/boop/server/internal/webpush"
 )
 
 func main() {
@@ -80,8 +81,14 @@ func run() error {
 		log.Warn("apns.not_configured", "missing", cfg.APNS.Missing())
 	}
 	dispatcher := delivery.New(db, devStore, sender, log)
+	wpClient, err := webpush.InitOrLoadKeys(ctx, st, cfg.WebPush, log)
+	if err != nil {
+		log.Warn("webpush.not_configured", "error", err.Error())
+	} else {
+		log.Info("webpush.configured", "public_key", wpClient.PublicKey())
+		dispatcher.SetWebPush(wpClient)
+	}
 	dispatcher.Start(ctx)
-
 	admin := auth.NewAdmin(cfg.AdminUser, cfg.AdminPassword)
 	if admin.Enabled() {
 		log.Info("auth.enabled", "user", cfg.AdminUser)
@@ -90,12 +97,12 @@ func run() error {
 	}
 
 	evStore := events.New(db)
+	eventHub := api.NewEventHub()
 	srv := &api.Server{
 		Config: cfg, DB: db, Log: log, Settings: st,
 		Projects: projects.New(db), Devices: devStore, Pairing: pairing.New(db, devStore), Events: evStore, Silences: silences.New(db),
-		Dispatcher: dispatcher, APNS: client, APNSError: apnsErr, Admin: admin, StartedAt: time.Now(), Web: web.Handler(),
+		Dispatcher: dispatcher, APNS: client, APNSError: apnsErr, WebPush: wpClient, EventHub: eventHub, Admin: admin, StartedAt: time.Now(), Web: web.Handler(),
 	}
-
 	go retentionLoop(ctx, log, st, evStore, srv.Pairing, cfg.RetentionDays)
 
 	httpServer := &http.Server{

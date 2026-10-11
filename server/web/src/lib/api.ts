@@ -124,6 +124,10 @@ export interface Status {
   retention_days: number
   setup_completed: boolean
   admin_auth: boolean
+  webpush?: {
+    configured: boolean
+    public_key?: string
+  }
 }
 
 export interface AuthState {
@@ -214,4 +218,9 @@ export const api = {
 
   test: (project_id?: string) =>
     request<{ event: Event; deliveries: Delivery[]; apns_configured: boolean }>('POST', '/api/v1/test', project_id ? { project_id } : {}),
+
+  getVapidKey: () => request<{ public_key: string }>('GET', '/api/v1/push/vapid-key'),
+  subscribePush: (data: { name?: string; platform?: string; subscription: unknown }) =>
+    request<{ device: Device; credential?: string }>('POST', '/api/v1/push/subscribe', data),
+  unsubscribePush: (endpoint: string) => request<void>('POST', '/api/v1/push/unsubscribe', { endpoint }),
 }

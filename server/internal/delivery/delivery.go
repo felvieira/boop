@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,11 +17,17 @@ import (
 	"github.com/chrisgreg/boop/server/internal/events/levels"
 	"github.com/chrisgreg/boop/server/internal/ids"
 	"github.com/chrisgreg/boop/server/internal/projects"
+	"github.com/chrisgreg/boop/server/internal/webpush"
 )
 
 // Sender is the subset of *apns.Client the dispatcher needs.
 type Sender interface {
 	Send(ctx context.Context, deviceToken string, n apns.Notification) (string, error)
+}
+
+// WebPushSender is the subset of *webpush.Client the dispatcher needs.
+type WebPushSender interface {
+	Send(ctx context.Context, subscriptionJSON string, n apns.Notification) (string, error)
 }
 
 // Statuses recorded in deliveries.status.
@@ -44,11 +51,12 @@ type Delivery struct {
 
 // Dispatcher sends notifications for events.
 type Dispatcher struct {
-	db      *sql.DB
-	devices *devices.Store
-	sender  Sender // nil when APNs is not configured
-	log     *slog.Logger
-	timeout time.Duration
+	db        *sql.DB
+	devices   *devices.Store
+	sender    Sender // nil when APNs is not configured
+	webSender WebPushSender // nil when Web Push is not configured
+	log       *slog.Logger
+	timeout   time.Duration
 
 	queue chan job
 	wg    sync.WaitGroup
@@ -63,6 +71,11 @@ type job struct {
 // recorded as skipped.
 func New(db *sql.DB, d *devices.Store, sender Sender, log *slog.Logger) *Dispatcher {
 	return &Dispatcher{db: db, devices: d, sender: sender, log: log, timeout: 10 * time.Second, queue: make(chan job, 1024)}
+}
+
+// SetWebPush sets the Web Push sender for PWA/browser notifications.
+func (d *Dispatcher) SetWebPush(s WebPushSender) {
+	d.webSender = s
 }
 
 // Start runs the background worker until ctx is cancelled.
@@ -122,25 +135,49 @@ func (d *Dispatcher) Deliver(ctx context.Context, e events.Event, p projects.Pro
 	var out []Delivery
 	for _, dev := range devs {
 		rec := Delivery{ID: ids.New("dlv"), EventID: e.ID, DeviceID: dev.ID, DeviceName: dev.Name, AttemptedAt: ids.Now()}
-		if d.sender == nil {
-			rec.Status = StatusSkipped
-			rec.Error = "APNs is not configured"
-		} else {
-			sctx, cancel := context.WithTimeout(ctx, d.timeout)
-			apnsID, err := d.sender.Send(sctx, *dev.DeviceToken, n)
-			cancel()
-			if err != nil {
-				rec.Status = StatusFailed
-				rec.Error = err.Error()
-				var ae *apns.Error
-				if errors.As(err, &ae) && ae.Unregistered() {
-					_ = d.devices.ClearToken(ctx, dev.ID)
-				}
-				d.log.Warn("push.failed", "event_id", e.ID, "device_id", dev.ID, "error", rec.Error)
+		isWeb := dev.Platform == "web" || dev.Platform == "pwa" || (dev.DeviceToken != nil && strings.HasPrefix(*dev.DeviceToken, "{"))
+		if isWeb {
+			if d.webSender == nil {
+				rec.Status = StatusSkipped
+				rec.Error = "Web Push is not configured"
 			} else {
-				rec.Status = StatusSent
-				rec.APNSID = apnsID
-				d.log.Info("push.sent", "event_id", e.ID, "device_id", dev.ID, "apns_id", apnsID)
+				sctx, cancel := context.WithTimeout(ctx, d.timeout)
+				wpID, err := d.webSender.Send(sctx, *dev.DeviceToken, n)
+				cancel()
+				if err != nil {
+					rec.Status = StatusFailed
+					rec.Error = err.Error()
+					if errors.Is(err, webpush.ErrUnregistered) {
+						_ = d.devices.ClearToken(ctx, dev.ID)
+					}
+					d.log.Warn("push.failed", "event_id", e.ID, "device_id", dev.ID, "platform", "web", "error", rec.Error)
+				} else {
+					rec.Status = StatusSent
+					rec.APNSID = wpID
+					d.log.Info("push.sent", "event_id", e.ID, "device_id", dev.ID, "platform", "web")
+				}
+			}
+		} else {
+			if d.sender == nil {
+				rec.Status = StatusSkipped
+				rec.Error = "APNs is not configured"
+			} else {
+				sctx, cancel := context.WithTimeout(ctx, d.timeout)
+				apnsID, err := d.sender.Send(sctx, *dev.DeviceToken, n)
+				cancel()
+				if err != nil {
+					rec.Status = StatusFailed
+					rec.Error = err.Error()
+					var ae *apns.Error
+					if errors.As(err, &ae) && ae.Unregistered() {
+						_ = d.devices.ClearToken(ctx, dev.ID)
+					}
+					d.log.Warn("push.failed", "event_id", e.ID, "device_id", dev.ID, "error", rec.Error)
+				} else {
+					rec.Status = StatusSent
+					rec.APNSID = apnsID
+					d.log.Info("push.sent", "event_id", e.ID, "device_id", dev.ID, "apns_id", apnsID)
+				}
 			}
 		}
 		if _, err := d.db.ExecContext(ctx, `INSERT INTO deliveries (id, event_id, device_id, status, apns_id, error, attempted_at, created_at) VALUES (?,?,?,?,?,?,?,?)`,

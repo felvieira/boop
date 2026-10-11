@@ -6,13 +6,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
-
 	"github.com/chrisgreg/boop/server/internal/apns"
 	"github.com/chrisgreg/boop/server/internal/auth"
 	"github.com/chrisgreg/boop/server/internal/config"
@@ -26,8 +27,8 @@ import (
 	"github.com/chrisgreg/boop/server/internal/projects"
 	"github.com/chrisgreg/boop/server/internal/settings"
 	"github.com/chrisgreg/boop/server/internal/silences"
+	"github.com/chrisgreg/boop/server/internal/webpush"
 )
-
 // Version is the server version, overridden at build time via -ldflags.
 var Version = "1.3.0"
 
@@ -45,9 +46,49 @@ type Server struct {
 	Dispatcher *delivery.Dispatcher
 	APNS       *apns.Client // nil when not configured
 	APNSError  string       // why APNS is nil
+	WebPush    *webpush.Client // nil when not configured
+	EventHub   *EventHub
 	Admin      *auth.Admin  // web UI / admin API login; open when not enabled
 	StartedAt  time.Time
 	Web        http.Handler
+}
+
+// EventHub broadcasts new events to SSE subscribers in real time.
+type EventHub struct {
+	mu          sync.RWMutex
+	subscribers map[chan events.Event]struct{}
+}
+
+func NewEventHub() *EventHub {
+	return &EventHub{
+		subscribers: make(map[chan events.Event]struct{}),
+	}
+}
+
+func (h *EventHub) Subscribe() chan events.Event {
+	ch := make(chan events.Event, 32)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.subscribers[ch] = struct{}{}
+	return ch
+}
+
+func (h *EventHub) Unsubscribe(ch chan events.Event) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.subscribers, ch)
+	close(ch)
+}
+
+func (h *EventHub) Publish(e events.Event) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for ch := range h.subscribers {
+		select {
+		case ch <- e:
+		default:
+		}
+	}
 }
 
 // Handler builds the router.
@@ -72,7 +113,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/events", s.readerAuth(s.listEvents))
 	mux.Handle("GET /api/v1/events/{id}", s.readerAuth(s.getEvent))
 	mux.Handle("GET /api/v1/events/{id}/deliveries", s.readerAuth(s.eventDeliveries))
+	mux.Handle("GET /api/v1/events/stream", s.readerAuth(s.streamEvents))
 
+	// Web Push (PWA).
+	mux.HandleFunc("GET /api/v1/push/vapid-key", s.getVAPIDKey)
+	mux.Handle("POST /api/v1/push/subscribe", s.readerAuth(s.subscribeWebPush))
+	mux.Handle("POST /api/v1/push/unsubscribe", s.readerAuth(s.unsubscribeWebPush))
 	// Devices: the paired phone manages itself; the web UI lists/removes.
 	mux.Handle("POST /api/v1/devices", s.deviceAuth(s.registerDevice))
 	mux.Handle("PATCH /api/v1/devices/{id}", s.deviceOrAdmin(s.updateDevice))
@@ -143,6 +189,12 @@ type statusWriter struct {
 func (w *statusWriter) WriteHeader(code int) {
 	w.status = code
 	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // projectAuth requires a project API key.
@@ -402,8 +454,13 @@ type statusResponse struct {
 	RetentionDays  int                `json:"retention_days"`
 	SetupCompleted bool               `json:"setup_completed"`
 	AdminAuth      bool               `json:"admin_auth"`
+	WebPush        webpushStatus      `json:"webpush"`
 }
 
+type webpushStatus struct {
+	Configured bool   `json:"configured"`
+	PublicKey  string `json:"public_key,omitempty"`
+}
 type apnsStatus struct {
 	Configured  bool     `json:"configured"`
 	Error       string   `json:"error,omitempty"`
@@ -422,6 +479,15 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.APNS = apnsStatus{Configured: s.APNS != nil, Error: s.APNSError, Missing: s.Config.APNS.Missing(),
 		TeamID: s.Config.APNS.TeamID, KeyID: s.Config.APNS.KeyID, BundleID: s.Config.APNS.BundleID, Environment: s.Config.APNS.Environment}
+	resp.WebPush = webpushStatus{
+		Configured: s.WebPush != nil && s.WebPush.PublicKey() != "",
+		PublicKey: func() string {
+			if s.WebPush != nil {
+				return s.WebPush.PublicKey()
+			}
+			return ""
+		}(),
+	}
 	devs, err := s.Devices.List(ctx)
 	if err != nil {
 		s.fail(w, err)
@@ -596,6 +662,9 @@ func (s *Server) createEvent(w http.ResponseWriter, r *http.Request) {
 	s.Log.Info("event.created", "event_id", e.ID, "project_id", p.ID, "event_level", e.Level)
 	if silenced := s.applySilence(r.Context(), &e); !silenced {
 		s.Dispatcher.Enqueue(e, p)
+	}
+	if s.EventHub != nil {
+		s.EventHub.Publish(e)
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": e.ID, "created_at": e.CreatedAt})
 }
@@ -969,5 +1038,141 @@ func (s *Server) testNotification(w http.ResponseWriter, r *http.Request) {
 	if dl == nil {
 		dl = []delivery.Delivery{}
 	}
+	if s.EventHub != nil {
+		s.EventHub.Publish(e)
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"event": e, "deliveries": dl, "apns_configured": s.APNS != nil})
+}
+
+// ---- live stream (SSE) ----
+
+func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "streaming unsupported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	if s.EventHub == nil {
+		s.EventHub = NewEventHub()
+	}
+	ch := s.EventHub.Subscribe()
+	defer s.EventHub.Unsubscribe(ch)
+
+	_, _ = w.Write([]byte("event: ping\ndata: {}\n\n"))
+	flusher.Flush()
+
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			_, _ = w.Write([]byte(": ping\n\n"))
+			flusher.Flush()
+		case e, ok := <-ch:
+			if !ok {
+				return
+			}
+			b, err := json.Marshal(e)
+			if err != nil {
+				continue
+			}
+			_, _ = fmt.Fprintf(w, "event: event\ndata: %s\n\n", b)
+			flusher.Flush()
+		}
+	}
+}
+
+// ---- web push ----
+
+func (s *Server) getVAPIDKey(w http.ResponseWriter, r *http.Request) {
+	if s.WebPush == nil || s.WebPush.PublicKey() == "" {
+		writeError(w, http.StatusNotFound, "not_configured", "web push is not configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"public_key": s.WebPush.PublicKey(),
+	})
+}
+
+func (s *Server) subscribeWebPush(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name         string          `json:"name"`
+		Platform     string          `json:"platform"`
+		Subscription json.RawMessage `json:"subscription"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if len(in.Subscription) == 0 {
+		writeError(w, http.StatusUnprocessableEntity, "invalid", "subscription is required")
+		return
+	}
+
+	subStr := string(in.Subscription)
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		name = "PWA Browser"
+	}
+	platform := strings.TrimSpace(in.Platform)
+	if platform == "" {
+		platform = "web"
+	}
+
+	if dev, ok := r.Context().Value(ctxDevice).(devices.Device); ok {
+		reg := devices.Registration{
+			Name:        &name,
+			Platform:    &platform,
+			DeviceToken: &subStr,
+		}
+		updated, err := s.Devices.Register(r.Context(), dev.ID, reg)
+		if err != nil {
+			s.fail(w, err)
+			return
+ 		}
+		s.Log.Info("webpush.updated", "device_id", updated.ID)
+		writeJSON(w, http.StatusOK, map[string]any{"device": updated})
+		return
+	}
+
+	dev, cred, err := s.Devices.Create(r.Context(), name, platform)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	reg := devices.Registration{
+		DeviceToken: &subStr,
+	}
+	updated, err := s.Devices.Register(r.Context(), dev.ID, reg)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.Log.Info("webpush.subscribed", "device_id", updated.ID, "name", updated.Name)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"device":     updated,
+		"credential": cred,
+	})
+}
+
+func (s *Server) unsubscribeWebPush(w http.ResponseWriter, r *http.Request) {
+	if dev, ok := r.Context().Value(ctxDevice).(devices.Device); ok {
+		_ = s.Devices.ClearToken(r.Context(), dev.ID)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	var in struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if readJSON(w, r, &in) && in.Endpoint != "" {
+		_ = s.Devices.DeleteByToken(r.Context(), in.Endpoint)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
