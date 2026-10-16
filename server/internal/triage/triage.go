@@ -34,13 +34,16 @@ var (
 )
 
 type Service struct {
-	db       *sql.DB
-	support  *support.Store
-	settings *settings.Store
-	apiKey   string
-	model    string
-	client   *http.Client
-	log      *slog.Logger
+	db              *sql.DB
+	support         *support.Store
+	settings        *settings.Store
+	apiKey          string
+	model           string
+	client          *http.Client
+	log             *slog.Logger
+	waitingLogged   bool
+	lastConfigError string
+	activeModel     string
 }
 
 type event struct {
@@ -107,49 +110,64 @@ func New(db *sql.DB, cards *support.Store, settingsStore *settings.Store, apiKey
 // with an at-least-once lease. Support card upserts are idempotent, so a crash
 // after creating a card cannot create duplicates on retry.
 func (s *Service) Run(ctx context.Context) {
-	waitingLogged := false
-	lastConfigError := ""
-	activeModel := ""
+	// Run once on startup so the existing queue is handled, then discover and
+	// classify new notifications on an hourly cadence. The durable triage row
+	// makes completed and ignored notifications ineligible for later runs.
+	s.runCycle(ctx)
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
 	for {
-		if err := s.discover(ctx); err != nil {
-			s.log.Error("support.triage.discover_failed", "error", err)
-		}
-		provider, configErr := s.effectiveConfig(ctx)
-		processed := 0
-		if configErr != nil {
-			if configErr.Error() != lastConfigError {
-				s.log.Error("support.triage.config_failed", "error", configErr)
-				lastConfigError = configErr.Error()
-			}
-		} else if provider.APIKey == "" {
-			if !waitingLogged {
-				s.log.Warn("support.triage.disabled", "reason", "OpenRouter key is not configured")
-				waitingLogged = true
-			}
-			lastConfigError = ""
-		} else {
-			waitingLogged = false
-			lastConfigError = ""
-			if provider.Model != activeModel {
-				s.log.Info("support.triage.started", "model", provider.Model, "key_source", provider.KeySource)
-				activeModel = provider.Model
-			}
-			var err error
-			processed, err = s.processBatch(ctx, provider.APIKey, provider.Model)
-			if err != nil {
-				s.log.Error("support.triage.batch_failed", "error", err)
-			}
-		}
-		wait := 15 * time.Second
-		if processed > 0 {
-			wait = 2 * time.Second
-		}
-		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return
-		case <-timer.C:
+		case <-ticker.C:
+			s.runCycle(ctx)
+		}
+	}
+}
+
+func (s *Service) runCycle(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		added, err := s.discover(ctx)
+		if err != nil {
+			s.log.Error("support.triage.discover_failed", "error", err)
+			break
+		}
+		if added < 500 {
+			break
+		}
+	}
+	provider, configErr := s.effectiveConfig(ctx)
+	if configErr != nil {
+		if configErr.Error() != s.lastConfigError {
+			s.log.Error("support.triage.config_failed", "error", configErr)
+			s.lastConfigError = configErr.Error()
+		}
+		return
+	}
+	s.lastConfigError = ""
+	if provider.APIKey == "" {
+		if !s.waitingLogged {
+			s.log.Warn("support.triage.disabled", "reason", "OpenRouter key is not configured")
+			s.waitingLogged = true
+		}
+		return
+	}
+	s.waitingLogged = false
+	if provider.Model != s.activeModel {
+		s.log.Info("support.triage.started", "model", provider.Model, "key_source", provider.KeySource)
+		s.activeModel = provider.Model
+	}
+	for ctx.Err() == nil {
+		processed, err := s.processBatch(ctx, provider.APIKey, provider.Model)
+		if err != nil {
+			s.log.Error("support.triage.batch_failed", "error", err)
+		}
+		if processed == 0 {
+			return
 		}
 	}
 }
@@ -161,14 +179,17 @@ func (s *Service) effectiveConfig(ctx context.Context) (settings.OpenRouterConfi
 	return settings.OpenRouterConfig{APIKey: s.apiKey, Model: s.model}, nil
 }
 
-func (s *Service) discover(ctx context.Context) error {
+func (s *Service) discover(ctx context.Context) (int64, error) {
 	now := ids.Now()
-	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO notification_triage
+	res, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO notification_triage
 		(event_id, state, attempts, next_attempt_at, created_at, updated_at)
 		SELECT e.id, 'pending', 0, ?, ?, ? FROM events e
 		WHERE NOT EXISTS (SELECT 1 FROM notification_triage t WHERE t.event_id=e.id)
 		ORDER BY e.created_at, e.id LIMIT 500`, now, now, now)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *Service) processBatch(ctx context.Context, apiKey, model string) (int, error) {
@@ -372,6 +393,7 @@ func (s *Service) promote(ctx context.Context, item event, result verdict) error
 		Sender:          truncateBytes(requester(item), 500),
 		ReportedAt:      item.OccurredAt,
 		OriginalText:    original,
+		Description:     digest,
 	}, nil)
 	return err
 }

@@ -89,7 +89,7 @@
   const activeTab = $derived(route.name === 'event' || route.name === 'group' ? '/' : router.path)
 </script>
 
-<div class="page">
+<div class="page" class:wide={route.name === 'support'}>
   <header>
     <a class="brand" href="/" onclick={link}>
       <span class="mark"></span>
@@ -246,5 +246,6 @@
   .signout { background: none; border: none; cursor: pointer; padding: 0; font: var(--up-type-ui); color: var(--up-text-muted); }
   .signout:hover { color: var(--up-ink); }
   .tabs { margin-bottom: var(--up-space-5); }
+  .page.wide { max-width: 1680px; }
   footer { margin-top: var(--up-space-6); padding-top: var(--up-space-4); border-top: 1px solid var(--up-border-hairline); }
 </style>

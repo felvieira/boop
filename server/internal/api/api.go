@@ -165,7 +165,25 @@ func (s *Server) Handler() http.Handler {
 
 	// AI-curated support cards and their private image attachments. These require
 	// configured admin auth even if the rest of Boop is deployed open.
+	mux.Handle("GET /api/v1/support/board", s.supportAuth(s.getSupportBoard))
+	mux.Handle("GET /api/v1/support/lists", s.supportAuth(s.listSupportLists))
+	mux.Handle("POST /api/v1/support/lists", s.supportAuth(s.createSupportList))
+	mux.Handle("PATCH /api/v1/support/lists/{id}", s.supportAuth(s.updateSupportList))
+	mux.Handle("DELETE /api/v1/support/lists/{id}", s.supportAuth(s.deleteSupportList))
 	mux.Handle("GET /api/v1/support/cards", s.supportAuth(s.listSupportCards))
+	mux.Handle("POST /api/v1/support/cards", s.supportAuth(s.createSupportCard))
+	mux.Handle("GET /api/v1/support/cards/{id}", s.supportAuth(s.getSupportCard))
+	mux.Handle("PATCH /api/v1/support/cards/{id}", s.supportAuth(s.updateSupportCard))
+	mux.Handle("POST /api/v1/support/cards/{id}/move", s.supportAuth(s.moveSupportCard))
+	mux.Handle("POST /api/v1/support/cards/{id}/archive", s.supportAuth(s.archiveSupportCard))
+	mux.Handle("POST /api/v1/support/cards/{id}/restore", s.supportAuth(s.restoreSupportCard))
+	mux.Handle("POST /api/v1/support/cards/{id}/comments", s.supportAuth(s.addSupportComment))
+	mux.Handle("DELETE /api/v1/support/cards/{id}/comments/{comment_id}", s.supportAuth(s.deleteSupportComment))
+	mux.Handle("POST /api/v1/support/cards/{id}/checklist", s.supportAuth(s.addSupportChecklistItem))
+	mux.Handle("PATCH /api/v1/support/cards/{id}/checklist/{item_id}", s.supportAuth(s.updateSupportChecklistItem))
+	mux.Handle("DELETE /api/v1/support/cards/{id}/checklist/{item_id}", s.supportAuth(s.deleteSupportChecklistItem))
+	mux.Handle("POST /api/v1/support/cards/{id}/attachments", s.supportAuth(s.addSupportAttachments))
+	mux.Handle("DELETE /api/v1/support/cards/{id}/attachments/{attachment_id}", s.supportAuth(s.deleteSupportAttachment))
 	mux.Handle("GET /api/v1/support/triage/status", s.supportAuth(s.supportTriageStatus))
 	mux.Handle("POST /api/v1/support/cards/upsert", s.supportIngestAuth(s.upsertSupportCard))
 	mux.Handle("PATCH /api/v1/support/cards/{id}/status", s.supportAuth(s.setSupportCardStatus))
@@ -1344,12 +1362,273 @@ type supportCardInput struct {
 }
 
 func (s *Server) listSupportCards(w http.ResponseWriter, r *http.Request) {
-	cards, err := s.Support.List(r.Context())
+	cards, err := s.Support.ListWithArchived(r.Context(), r.URL.Query().Get("archived") == "true")
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"cards": cards})
+}
+
+func (s *Server) getSupportBoard(w http.ResponseWriter, r *http.Request) {
+	lists, err := s.Support.Lists(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	cards, err := s.Support.ListWithArchived(r.Context(), r.URL.Query().Get("archived") == "true")
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"lists": lists, "cards": cards})
+}
+
+func supportMutationError(w http.ResponseWriter, s *Server, err error) {
+	switch {
+	case errors.Is(err, support.ErrInvalid):
+		writeError(w, http.StatusUnprocessableEntity, "invalid_support_input", "check the card or list details and try again")
+	case errors.Is(err, support.ErrInUse):
+		writeError(w, http.StatusConflict, "support_list_not_empty", "move the cards out of this list before deleting it")
+	case errors.Is(err, support.ErrNotFound):
+		writeError(w, http.StatusNotFound, "support_item_not_found", "the card, list, or item no longer exists")
+	default:
+		s.fail(w, err)
+	}
+}
+
+func (s *Server) listSupportLists(w http.ResponseWriter, r *http.Request) {
+	lists, err := s.Support.Lists(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"lists": lists})
+}
+
+func (s *Server) createSupportList(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	list, err := s.Support.CreateList(r.Context(), in.Name)
+	if err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, list)
+}
+
+func (s *Server) updateSupportList(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name     *string `json:"name"`
+		Position *int    `json:"position"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	id := r.PathValue("id")
+	if in.Name != nil {
+		if _, err := s.Support.RenameList(r.Context(), id, *in.Name); err != nil {
+			supportMutationError(w, s, err)
+			return
+		}
+	}
+	if in.Position != nil {
+		if err := s.Support.MoveList(r.Context(), id, *in.Position); err != nil {
+			supportMutationError(w, s, err)
+			return
+		}
+	}
+	lists, err := s.Support.Lists(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"lists": lists})
+}
+
+func (s *Server) deleteSupportList(w http.ResponseWriter, r *http.Request) {
+	if err := s.Support.DeleteList(r.Context(), r.PathValue("id")); err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) createSupportCard(w http.ResponseWriter, r *http.Request) {
+	var in support.CardInput
+	if !readJSON(w, r, &in) {
+		return
+	}
+	card, err := s.Support.CreateCard(r.Context(), in)
+	if err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, card)
+}
+
+func (s *Server) getSupportCard(w http.ResponseWriter, r *http.Request) {
+	card, err := s.Support.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, card)
+}
+
+func (s *Server) updateSupportCard(w http.ResponseWriter, r *http.Request) {
+	var in support.CardEdit
+	if !readJSON(w, r, &in) {
+		return
+	}
+	card, err := s.Support.UpdateCard(r.Context(), r.PathValue("id"), in)
+	if err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, card)
+}
+
+func (s *Server) moveSupportCard(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		ListID   string `json:"list_id"`
+		Position int    `json:"position"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	card, err := s.Support.MoveCard(r.Context(), r.PathValue("id"), in.ListID, in.Position)
+	if err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, card)
+}
+
+func (s *Server) archiveSupportCard(w http.ResponseWriter, r *http.Request) {
+	card, err := s.Support.SetArchived(r.Context(), r.PathValue("id"), true)
+	if err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, card)
+}
+
+func (s *Server) restoreSupportCard(w http.ResponseWriter, r *http.Request) {
+	card, err := s.Support.SetArchived(r.Context(), r.PathValue("id"), false)
+	if err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, card)
+}
+
+func (s *Server) addSupportComment(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Body string `json:"body"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	comment, err := s.Support.AddComment(r.Context(), r.PathValue("id"), in.Body)
+	if err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, comment)
+}
+
+func (s *Server) deleteSupportComment(w http.ResponseWriter, r *http.Request) {
+	if err := s.Support.DeleteComment(r.Context(), r.PathValue("id"), r.PathValue("comment_id")); err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) addSupportChecklistItem(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Text string `json:"text"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	item, err := s.Support.AddChecklistItem(r.Context(), r.PathValue("id"), in.Text)
+	if err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) updateSupportChecklistItem(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Done bool `json:"done"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if err := s.Support.UpdateChecklistItem(r.Context(), r.PathValue("id"), r.PathValue("item_id"), in.Done); err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	card, err := s.Support.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, card)
+}
+
+func (s *Server) deleteSupportChecklistItem(w http.ResponseWriter, r *http.Request) {
+	if err := s.Support.DeleteChecklistItem(r.Context(), r.PathValue("id"), r.PathValue("item_id")); err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) addSupportAttachments(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
+	if err := r.ParseMultipartForm(2 << 20); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "too_large", "request body must be 8 MB or smaller")
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid_multipart", "expected image attachments")
+		}
+		return
+	}
+	files, ok := parseSupportImageAttachments(w, r)
+	if !ok {
+		return
+	}
+	if len(files) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_attachment", "choose at least one image")
+		return
+	}
+	if err := s.Support.AddAttachments(r.Context(), r.PathValue("id"), files); err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	card, err := s.Support.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, card)
+}
+
+func (s *Server) deleteSupportAttachment(w http.ResponseWriter, r *http.Request) {
+	if err := s.Support.DeleteAttachment(r.Context(), r.PathValue("id"), r.PathValue("attachment_id")); err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) supportTriageStatus(w http.ResponseWriter, r *http.Request) {
@@ -1422,38 +1701,9 @@ func (s *Server) upsertSupportCard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_json", "metadata must be a JSON object")
 		return
 	}
-	parts := r.MultipartForm.File["attachments"]
-	files := make([]support.Attachment, 0, len(parts))
-	var total int64
-	for _, part := range parts {
-		if total+part.Size > 7<<20 {
-			writeError(w, http.StatusRequestEntityTooLarge, "too_large", "image attachments must total 7 MB or less")
-			return
-		}
-		total += part.Size
-		f, err := part.Open()
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_attachment", "could not open attachment")
-			return
-		}
-		data, readErr := io.ReadAll(io.LimitReader(f, 7<<20))
-		_ = f.Close()
-		if readErr != nil {
-			writeError(w, http.StatusBadRequest, "invalid_attachment", "could not read attachment")
-			return
-		}
-		_, format, decodeErr := image.DecodeConfig(bytes.NewReader(data))
-		contentTypes := map[string]string{"png": "image/png", "jpeg": "image/jpeg", "gif": "image/gif"}
-		contentType := contentTypes[format]
-		if decodeErr != nil || contentType == "" {
-			writeError(w, http.StatusUnprocessableEntity, "invalid_attachment", "only valid PNG, JPEG, and GIF images are accepted")
-			return
-		}
-		filename := filepath.Base(strings.ReplaceAll(part.Filename, string(rune(92)), "/"))
-		if filename == "." || filename == "" || len(filename) > 180 {
-			filename = "attachment"
-		}
-		files = append(files, support.Attachment{Filename: filename, ContentType: contentType, Content: data})
+	files, ok := parseSupportImageAttachments(w, r)
+	if !ok {
+		return
 	}
 	card, err := s.Support.Upsert(r.Context(), support.Input{
 		SourceAccount: in.SourceAccount, SourceThreadID: in.SourceThreadID, SourceMessageID: in.SourceMessageID,
@@ -1468,6 +1718,43 @@ func (s *Server) upsertSupportCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, card)
+}
+
+func parseSupportImageAttachments(w http.ResponseWriter, r *http.Request) ([]support.Attachment, bool) {
+	parts := r.MultipartForm.File["attachments"]
+	files := make([]support.Attachment, 0, len(parts))
+	var total int64
+	for _, part := range parts {
+		if total+part.Size > 7<<20 {
+			writeError(w, http.StatusRequestEntityTooLarge, "too_large", "image attachments must total 7 MB or less")
+			return nil, false
+		}
+		total += part.Size
+		f, err := part.Open()
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_attachment", "could not open attachment")
+			return nil, false
+		}
+		data, readErr := io.ReadAll(io.LimitReader(f, (7<<20)+1))
+		_ = f.Close()
+		if readErr != nil || len(data) > 7<<20 {
+			writeError(w, http.StatusBadRequest, "invalid_attachment", "could not read attachment or file exceeds the limit")
+			return nil, false
+		}
+		_, format, decodeErr := image.DecodeConfig(bytes.NewReader(data))
+		contentTypes := map[string]string{"png": "image/png", "jpeg": "image/jpeg", "gif": "image/gif"}
+		contentType := contentTypes[format]
+		if decodeErr != nil || contentType == "" {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_attachment", "only valid PNG, JPEG, and GIF images are accepted")
+			return nil, false
+		}
+		filename := filepath.Base(strings.ReplaceAll(part.Filename, string(rune(92)), "/"))
+		if filename == "." || filename == "" || len(filename) > 180 {
+			filename = "attachment"
+		}
+		files = append(files, support.Attachment{Filename: filename, ContentType: contentType, Content: data})
+	}
+	return files, true
 }
 
 func (s *Server) setSupportCardStatus(w http.ResponseWriter, r *http.Request) {

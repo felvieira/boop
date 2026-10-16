@@ -148,11 +148,22 @@ export interface Status {
 }
 
 export type SupportStatus = 'new' | 'in_progress' | 'blocked' | 'done'
+export type SupportPriority = 'low' | 'normal' | 'high' | 'urgent'
+export interface SupportLabel { name: string; color: 'purple' | 'blue' | 'green' | 'yellow' | 'orange' | 'red' | 'gray' }
+export interface SupportList { id: string; name: string; position: number; status: SupportStatus; is_default: boolean; created_at: string; updated_at: string }
 export interface SupportAttachment { id: string; filename: string; content_type: string; created_at: string }
+export interface SupportChecklistItem { id: string; text: string; done: boolean; position: number; created_at: string; updated_at: string }
+export interface SupportComment { id: string; body: string; author: string; created_at: string }
 export interface SupportCard {
   id: string; source_account: string; source_thread_id: string; source_message_id: string
   product: string; title: string; sender: string; reported_at: string; original_text: string
-  status: SupportStatus; created_at: string; updated_at: string; attachments: SupportAttachment[]
+  status: SupportStatus; list_id: string; position: number; description: string; due_at: string; priority: SupportPriority
+  labels: SupportLabel[]; archived_at: string; manual: boolean; comments_count: number
+  checklist_done: number; checklist_total: number; created_at: string; updated_at: string
+  attachments: SupportAttachment[]; checklist: SupportChecklistItem[]; comments: SupportComment[]
+}
+export interface SupportCardDraft {
+  title: string; product: string; description: string; priority: SupportPriority; due_at: string; list_id: string; labels: SupportLabel[]
 }
 export interface SupportCardInput {
   source_account: string; source_thread_id: string; source_message_id: string
@@ -218,8 +229,37 @@ export function setLoginHandler(fn: () => void) {
 export const api = {
   me: () => request<AuthState>('GET', '/api/v1/auth/me'),
   supportCards: () => request<{ cards: SupportCard[] }>('GET', '/api/v1/support/cards'),
+  supportBoard: (archived = false) => request<{ lists: SupportList[]; cards: SupportCard[] }>('GET', `/api/v1/support/board${archived ? '?archived=true' : ''}`),
+  supportCard: (id: string) => request<SupportCard>('GET', `/api/v1/support/cards/${encodeURIComponent(id)}`),
   supportTriageStatus: () => request<SupportTriageStatus>('GET', '/api/v1/support/triage/status'),
   setSupportCardStatus: (id: string, status: SupportStatus) => request<SupportCard>('PATCH', `/api/v1/support/cards/${encodeURIComponent(id)}/status`, { status }),
+  createSupportCard: (input: SupportCardDraft) => request<SupportCard>('POST', '/api/v1/support/cards', input),
+  updateSupportCard: (id: string, input: SupportCardDraft) => request<SupportCard>('PATCH', `/api/v1/support/cards/${encodeURIComponent(id)}`, input),
+  moveSupportCard: (id: string, list_id: string, position: number) => request<SupportCard>('POST', `/api/v1/support/cards/${encodeURIComponent(id)}/move`, { list_id, position }),
+  archiveSupportCard: (id: string) => request<SupportCard>('POST', `/api/v1/support/cards/${encodeURIComponent(id)}/archive`),
+  restoreSupportCard: (id: string) => request<SupportCard>('POST', `/api/v1/support/cards/${encodeURIComponent(id)}/restore`),
+  createSupportList: (name: string) => request<SupportList>('POST', '/api/v1/support/lists', { name }),
+  updateSupportList: (id: string, patch: { name?: string; position?: number }) => request<{ lists: SupportList[] }>('PATCH', `/api/v1/support/lists/${encodeURIComponent(id)}`, patch),
+  deleteSupportList: (id: string) => request<void>('DELETE', `/api/v1/support/lists/${encodeURIComponent(id)}`),
+  addSupportComment: (id: string, body: string) => request<SupportComment>('POST', `/api/v1/support/cards/${encodeURIComponent(id)}/comments`, { body }),
+  deleteSupportComment: (id: string, commentId: string) => request<void>('DELETE', `/api/v1/support/cards/${encodeURIComponent(id)}/comments/${encodeURIComponent(commentId)}`),
+  addSupportChecklistItem: (id: string, text: string) => request<SupportChecklistItem>('POST', `/api/v1/support/cards/${encodeURIComponent(id)}/checklist`, { text }),
+  updateSupportChecklistItem: (id: string, itemId: string, done: boolean) => request<SupportCard>('PATCH', `/api/v1/support/cards/${encodeURIComponent(id)}/checklist/${encodeURIComponent(itemId)}`, { done }),
+  deleteSupportChecklistItem: (id: string, itemId: string) => request<void>('DELETE', `/api/v1/support/cards/${encodeURIComponent(id)}/checklist/${encodeURIComponent(itemId)}`),
+  addSupportAttachments: async (id: string, files: File[]) => {
+    const form = new FormData()
+    for (const file of files) form.append('attachments', file, file.name)
+    const res = await fetch(`/api/v1/support/cards/${encodeURIComponent(id)}/attachments`, { method: 'POST', body: form })
+    const text = await res.text()
+    let parsed: any = null
+    try { parsed = text ? JSON.parse(text) : null } catch { /* handled below */ }
+    if (!res.ok) {
+      if (res.status === 401 && parsed?.error === 'login_required') onLoginRequired?.()
+      throw new ApiError(res.status, parsed?.error ?? 'error', parsed?.message ?? `Request failed (${res.status})`)
+    }
+    return parsed as SupportCard
+  },
+  deleteSupportAttachment: (id: string, attachmentId: string) => request<void>('DELETE', `/api/v1/support/cards/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`),
   upsertSupportCard: async (input: SupportCardInput, files: File[] = []) => {
     const form = new FormData()
     form.set('metadata', JSON.stringify(input))

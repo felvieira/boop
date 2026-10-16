@@ -1,6 +1,8 @@
-# AI-curated support Kanban
+# AI-curated support board
 
-Boop's **Support** tab reviews notifications from every connected project in four lanes: New, In progress, Blocked, and Done. The server sends notification text to OpenRouter's configured model, classifies actionable customer contacts, bug reports, corrections, suggestions, partner leads, and customer requests, then creates a card for each match. Routine billing, deployment, cron, and status notices stay in Inbox and are marked as filtered. Cards include the project, AI digest, sender/email when present in the original notification, timestamp, and original redacted notification. Card content is stored in the existing SQLite database.
+Boop's **Support** tab is a private Trello-style board for actionable customer contacts, bug reports, corrections, suggestions, partner leads, and customer requests from every connected project. It starts with New, In progress, Blocked, and Done lists; admins can add, rename, reorder, and remove empty custom lists. Cards can be created manually or by AI triage, moved with drag and drop or keyboard controls, edited, searched, filtered by project, and archived or restored. Card details support descriptions, labels, priorities, due dates, checklists, comments, and image attachments. All board data is stored in SQLite.
+
+The triage worker discovers notifications at startup and once per hour after that. It processes queued notifications in batches only when they are pending or due for retry. The durable `notification_triage` row records every matched or ignored event, so completed notifications are not sent to the model again. On the first run, pending notifications already in the queue are processed too. Routine billing, deployment, cron, and status notices remain in Inbox and are marked as filtered. AI cards retain the source project, sender/email when present, timestamp, and original notification for review.
 
 Migration `0005_notification_triage.sql` queues every event already stored in Boop. A background worker discovers new events and processes both old and new notifications from the same durable queue. Failed OpenRouter calls are retried with backoff; card upserts use the event identity, so a retry cannot create a duplicate. The Support tab shows queue progress.
 
@@ -12,7 +14,7 @@ Boop only processes events already ingested into its notification database. It d
 
 ## Privacy and access
 
-The board, card list, status changes, and image reads require Boop's existing administrator login. They stay closed when admin auth is disabled, even if older Boop routes are open behind a reverse proxy. Project API keys, device credentials, and the support-ingest token cannot read or change those routes. Image bytes are private/no-store and decoded as PNG, JPEG, or GIF before storage.
+The board, card and list changes, comments, checklists, archive, and image reads require Boop's existing administrator login. They stay closed when admin auth is disabled, even if older Boop routes are open behind a reverse proxy. Project API keys, device credentials, and the support-ingest token cannot read or change those routes. Image bytes are private/no-store and decoded as PNG, JPEG, or GIF before storage.
 
 For a least-privilege automation path, Boop also accepts the optional BOOP_SUPPORT_INGEST_TOKEN only on POST /api/v1/support/cards/upsert. It is a write-only bearer token for idempotent card upserts; it cannot list cards, move statuses, read messages, or fetch images. Configure its value through the deployment secret manager and reference that same secret from an approved automation HTTP step. The application never generates or returns the token. Keep it unset until an owner explicitly approves creating that credential.
 
@@ -38,8 +40,12 @@ curl --fail-with-body -H "Authorization: Bearer $BOOP_SUPPORT_INGEST_TOKEN" \
 
 Other endpoints, also requiring admin auth:
 
-- `GET /api/v1/support/cards` returns the board and attachment metadata.
-- `PATCH /api/v1/support/cards/{id}/status` with `{"status":"in_progress"}` moves a card (`new`, `in_progress`, `blocked`, `done`).
+- `GET /api/v1/support/board` returns lists, cards, and attachment metadata. Add `?archived=true` to include archived cards.
+- `POST /api/v1/support/lists`, `PATCH /api/v1/support/lists/{id}`, and `DELETE /api/v1/support/lists/{id}` manage custom lists. Lists that still contain cards cannot be deleted; the four default lists are permanent.
+- `POST /api/v1/support/cards` and `PATCH /api/v1/support/cards/{id}` create and edit board cards.
+- `POST /api/v1/support/cards/{id}/move` with `{"list_id":"...","position":0}` moves a card to a list and position. The legacy `PATCH /api/v1/support/cards/{id}/status` endpoint still moves cards to the four matching default lists.
+- `POST /api/v1/support/cards/{id}/archive` and `/restore` archive and restore cards.
+- `POST /api/v1/support/cards/{id}/comments` and `POST /api/v1/support/cards/{id}/checklist` add card activity and checklist items.
 - `GET /api/v1/support/cards/{id}/attachments/{attachment_id}` streams a private image.
 
-The web board polls for updates every 30 seconds and can move cards between lanes. It does not send email or access Gmail.
+The web board polls for card changes every 30 seconds. It does not send email or access Gmail.
