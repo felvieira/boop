@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, type SupportCard, type SupportStatus } from '../lib/api'
+  import { api, type SupportCard, type SupportStatus, type SupportTriageStatus } from '../lib/api'
   import Button from '../lib/ui/Button.svelte'
   import Card from '../lib/ui/Card.svelte'
   import Empty from '../lib/ui/Empty.svelte'
@@ -12,6 +12,7 @@
     { status: 'done', label: 'Done' },
   ]
   let cards = $state<SupportCard[]>([])
+  let triageStatus = $state<SupportTriageStatus | null>(null)
   let loading = $state(true)
   let error = $state('')
   let busy = $state('')
@@ -19,7 +20,9 @@
   async function load() {
     try {
       error = ''
-      cards = (await api.supportCards()).cards
+      const [board, status] = await Promise.all([api.supportCards(), api.supportTriageStatus()])
+      cards = board.cards
+      triageStatus = status
     } catch (e: any) {
       error = e.message
     } finally {
@@ -52,18 +55,24 @@
 <div class="stack">
   <div class="toolbar">
     <div>
-      <h1>Support requests</h1>
-      <p class="muted">Email reports with the original message and attached images.</p>
+      <h1>Support review</h1>
+      <p class="muted">AI-curated customer reports, bugs, suggestions, and partner leads from all Boop projects.</p>
     </div>
     <span class="spacer"></span>
     <Button variant="secondary" size="sm" onclick={load} disabled={loading}>Refresh</Button>
   </div>
+  {#if triageStatus}
+    <p class="muted triage-status" aria-live="polite">
+      AI triage: {triageStatus.pending + triageStatus.processing} notifications to review ·
+      {triageStatus.matched} cards created · {triageStatus.ignored} routine notifications filtered out
+    </p>
+  {/if}
   {#if error}<Notice tone="bad">{error.includes('support_auth_required') ? 'The private support board is disabled. Configure BOOP_ADMIN_USER and BOOP_ADMIN_PASSWORD, then sign in.' : error}</Notice>{/if}
 
   {#if loading && cards.length === 0}
     <Card><div class="muted">Loading support requests…</div></Card>
   {:else if !error && cards.length === 0}
-    <Card flush><Empty title="No support requests yet">When the email automation posts its first report, it will appear here.</Empty></Card>
+    <Card flush><Empty title="No support items yet">Actionable contacts and feedback from Boop notifications will appear here after AI triage.</Empty></Card>
   {:else}
     <div class="board" aria-label="Support request Kanban board">
       {#each lanes as lane (lane.status)}
@@ -85,7 +94,7 @@
                 </div>
               {/if}
               <div class="reference" title={`Conversation ${card.source_thread_id}; message ${card.source_message_id}`}>
-                Email ref · {card.source_thread_id} / {card.source_message_id}
+                Boop event · {card.source_thread_id} / {card.source_message_id}
               </div>
               <label class="move">Move to
                 <select value={card.status} disabled={busy === card.id} onchange={(e) => move(card, (e.currentTarget as HTMLSelectElement).value as SupportStatus)}>
@@ -107,6 +116,7 @@
   h3 { font: var(--up-type-row-title); color: var(--up-ink); overflow-wrap: anywhere; }
   .toolbar { display: flex; align-items: center; gap: var(--up-space-3); }
   .toolbar p { margin-top: 5px; }
+  .triage-status { margin: 4px 0 10px; }
   .spacer { flex: 1; }
   .board { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: var(--up-space-3); align-items: start; overflow-x: auto; padding-bottom: 8px; }
   .lane { min-width: 220px; padding: 10px; border-radius: var(--up-radius-card); background: #f6f6fa; min-height: 200px; }

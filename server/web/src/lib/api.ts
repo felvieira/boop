@@ -70,6 +70,13 @@ export interface EventPage {
   next_cursor?: string
 }
 
+export interface SupportTriageStatus {
+  pending: number
+  processing: number
+  matched: number
+  ignored: number
+}
+
 export interface Device {
   id: string
   name: string
@@ -192,6 +199,7 @@ export function setLoginHandler(fn: () => void) {
 export const api = {
   me: () => request<AuthState>('GET', '/api/v1/auth/me'),
   supportCards: () => request<{ cards: SupportCard[] }>('GET', '/api/v1/support/cards'),
+  supportTriageStatus: () => request<SupportTriageStatus>('GET', '/api/v1/support/triage/status'),
   setSupportCardStatus: (id: string, status: SupportStatus) => request<SupportCard>('PATCH', `/api/v1/support/cards/${encodeURIComponent(id)}/status`, { status }),
   upsertSupportCard: async (input: SupportCardInput, files: File[] = []) => {
     const form = new FormData()

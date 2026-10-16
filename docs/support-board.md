@@ -1,6 +1,12 @@
-# Private support Kanban
+# AI-curated support Kanban
 
-Boop's **Support** tab tracks customer email reports in four lanes: New, In progress, Blocked, and Done. Each card keeps the product, subject, sender, reported time, original plain-text report, Gmail account/conversation/message identifiers, and any attached screenshots. Card content and image bytes are stored in the existing SQLite database.
+Boop's **Support** tab reviews notifications from every connected project in four lanes: New, In progress, Blocked, and Done. The server sends notification text to OpenRouter's configured model, classifies actionable customer contacts, bug reports, corrections, suggestions, partner leads, and customer requests, then creates a card for each match. Routine billing, deployment, cron, and status notices stay in Inbox and are marked as filtered. Cards include the project, AI digest, sender/email when present in the original notification, timestamp, and original redacted notification. Card content is stored in the existing SQLite database.
+
+Migration `0005_notification_triage.sql` queues every event already stored in Boop. A background worker discovers new events and processes both old and new notifications from the same durable queue. Failed OpenRouter calls are retried with backoff; card upserts use the event identity, so a retry cannot create a duplicate. The Support tab shows queue progress.
+
+Configure `OPENROUTER_API_KEY` in the Boop deployment environment. `BOOP_TRIAGE_MODEL` defaults to `google/gemini-3.8-flash`. Email and phone strings, name fields, and common credential fields are omitted from the model prompt. Full stored notification text is retained in the private card so the owner can review the source.
+
+Boop only processes events already ingested into its notification database. It does not log in to or read a mailbox; an email source must already forward its message into Boop as a notification event.
 
 ## Privacy and access
 
@@ -8,7 +14,7 @@ The board, card list, status changes, and image reads require Boop's existing ad
 
 For a least-privilege automation path, Boop also accepts the optional BOOP_SUPPORT_INGEST_TOKEN only on POST /api/v1/support/cards/upsert. It is a write-only bearer token for idempotent card upserts; it cannot list cards, move statuses, read messages, or fetch images. Configure its value through the deployment secret manager and reference that same secret from an approved automation HTTP step. The application never generates or returns the token. Keep it unset until an owner explicitly approves creating that credential.
 
-The existing administrator login is global and grants access to other Boop administration features. Do not add that password to the Gmail automation unless the account owner explicitly approves that broader access. No token is generated or configured by this implementation, and it does not connect to Gmail.
+The existing administrator login is global and grants access to other Boop administration features. The optional write-only support-ingest token remains available for an external automation, but this built-in triage worker writes cards directly to SQLite and does not need that token or the admin password.
 
 ## Automation API
 

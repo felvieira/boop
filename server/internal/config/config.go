@@ -30,6 +30,10 @@ type Config struct {
 	// SupportIngestToken grants write-only access to POST /api/v1/support/cards/upsert.
 	SupportIngestToken string
 
+	// OpenRouterAPIKey enables AI triage of notification events into support cards.
+	OpenRouterAPIKey string
+	OpenRouterModel  string
+
 	APNS    APNS
 	WebPush WebPush
 }
@@ -86,6 +90,8 @@ func Load() (Config, error) {
 		AdminPassword:      env("BOOP_ADMIN_PASSWORD", ""),
 		MCPToken:           strings.TrimSpace(env("BOOP_MCP_TOKEN", "")),
 		SupportIngestToken: strings.TrimSpace(env("BOOP_SUPPORT_INGEST_TOKEN", "")),
+		OpenRouterAPIKey:   strings.TrimSpace(env("OPENROUTER_API_KEY", "")),
+		OpenRouterModel:    strings.TrimSpace(env("BOOP_TRIAGE_MODEL", "google/gemini-3.8-flash")),
 		APNS: APNS{
 			TeamID:         env("APNS_TEAM_ID", ""),
 			KeyID:          env("APNS_KEY_ID", ""),

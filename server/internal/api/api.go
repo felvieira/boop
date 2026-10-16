@@ -158,9 +158,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PATCH /api/v1/settings", s.adminAuth(s.updateSettings))
 	mux.Handle("POST /api/v1/test", s.adminAuth(s.testNotification))
 
-	// Email support cards and their private image attachments. These require
+	// AI-curated support cards and their private image attachments. These require
 	// configured admin auth even if the rest of Boop is deployed open.
 	mux.Handle("GET /api/v1/support/cards", s.supportAuth(s.listSupportCards))
+	mux.Handle("GET /api/v1/support/triage/status", s.supportAuth(s.supportTriageStatus))
 	mux.Handle("POST /api/v1/support/cards/upsert", s.supportIngestAuth(s.upsertSupportCard))
 	mux.Handle("PATCH /api/v1/support/cards/{id}/status", s.supportAuth(s.setSupportCardStatus))
 	mux.Handle("GET /api/v1/support/cards/{id}/attachments/{attachment_id}", s.supportAuth(s.getSupportAttachment))
@@ -1257,6 +1258,30 @@ func (s *Server) listSupportCards(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"cards": cards})
+}
+
+func (s *Server) supportTriageStatus(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.DB.QueryContext(r.Context(), `SELECT state, COUNT(*) FROM notification_triage GROUP BY state`)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	defer rows.Close()
+	counts := map[string]int{"pending": 0, "processing": 0, "matched": 0, "ignored": 0}
+	for rows.Next() {
+		var state string
+		var count int
+		if err := rows.Scan(&state, &count); err != nil {
+			s.fail(w, err)
+			return
+		}
+		counts[state] = count
+	}
+	if err := rows.Err(); err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, counts)
 }
 
 // upsertSupportCard accepts multipart/form-data with a JSON metadata field and

@@ -27,6 +27,7 @@ import (
 	"github.com/chrisgreg/boop/server/internal/settings"
 	"github.com/chrisgreg/boop/server/internal/silences"
 	"github.com/chrisgreg/boop/server/internal/support"
+	"github.com/chrisgreg/boop/server/internal/triage"
 	"github.com/chrisgreg/boop/server/internal/web"
 	"github.com/chrisgreg/boop/server/internal/webpush"
 )
@@ -104,6 +105,15 @@ func run() error {
 		Projects: projects.New(db), Devices: devStore, Pairing: pairing.New(db, devStore), Events: evStore, Silences: silences.New(db), Support: support.New(db),
 		Dispatcher: dispatcher, APNS: client, APNSError: apnsErr, WebPush: wpClient, EventHub: eventHub, Admin: admin, StartedAt: time.Now(), Web: web.Handler(),
 	}
+	triageDone := make(chan struct{})
+	go func() {
+		defer close(triageDone)
+		triage.New(db, srv.Support, cfg.OpenRouterAPIKey, cfg.OpenRouterModel, log).Run(ctx)
+	}()
+	defer func() {
+		stop()
+		<-triageDone
+	}()
 	go retentionLoop(ctx, log, st, evStore, srv.Pairing, cfg.RetentionDays)
 
 	httpServer := &http.Server{
