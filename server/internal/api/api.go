@@ -8,6 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/chrisgreg/boop/server/internal/apns"
 	"github.com/chrisgreg/boop/server/internal/auth"
 	"github.com/chrisgreg/boop/server/internal/config"
@@ -17,6 +22,7 @@ import (
 	"github.com/chrisgreg/boop/server/internal/events/levels"
 	"github.com/chrisgreg/boop/server/internal/events/redact"
 	"github.com/chrisgreg/boop/server/internal/mcp"
+	"github.com/chrisgreg/boop/server/internal/openrouter"
 	"github.com/chrisgreg/boop/server/internal/pairing"
 	"github.com/chrisgreg/boop/server/internal/projects"
 	"github.com/chrisgreg/boop/server/internal/settings"
@@ -32,9 +38,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
-	"strings"
-	"sync"
-	"time"
 )
 
 // Version is the server version, overridden at build time via -ldflags.
@@ -52,6 +55,7 @@ type Server struct {
 	Events     *events.Store
 	Silences   *silences.Store
 	Support    *support.Store
+	OpenRouter *openrouter.Client
 	Dispatcher *delivery.Dispatcher
 	APNS       *apns.Client    // nil when not configured
 	APNSError  string          // why APNS is nil
@@ -156,6 +160,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/status", s.adminAuth(s.status))
 	mux.Handle("GET /api/v1/settings", s.adminAuth(s.getSettings))
 	mux.Handle("PATCH /api/v1/settings", s.adminAuth(s.updateSettings))
+	mux.Handle("GET /api/v1/openrouter/models", s.adminAuth(s.listOpenRouterModels))
 	mux.Handle("POST /api/v1/test", s.adminAuth(s.testNotification))
 
 	// AI-curated support cards and their private image attachments. These require
@@ -602,21 +607,30 @@ func (s *Server) baseURL(r *http.Request) string {
 // ---- settings ----
 
 type settingsResponse struct {
-	RetentionDays  int      `json:"retention_days"`
-	RedactKeys     []string `json:"redact_keys"`
-	DefaultRedact  []string `json:"default_redact_keys"`
-	SetupCompleted bool     `json:"setup_completed"`
-	MCPEnabled     bool     `json:"mcp_enabled"`
+	RetentionDays          int      `json:"retention_days"`
+	RedactKeys             []string `json:"redact_keys"`
+	DefaultRedact          []string `json:"default_redact_keys"`
+	SetupCompleted         bool     `json:"setup_completed"`
+	MCPEnabled             bool     `json:"mcp_enabled"`
+	OpenRouterAPIKeySet    bool     `json:"openrouter_api_key_set"`
+	OpenRouterAPIKeySource string   `json:"openrouter_api_key_source"`
+	OpenRouterAPIKeyError  bool     `json:"openrouter_api_key_error"`
+	OpenRouterModel        string   `json:"openrouter_model"`
 	// MCPTokenSet reports whether BOOP_MCP_TOKEN is configured (never the token itself).
 	MCPTokenSet bool `json:"mcp_token_set"`
 }
 
 type settingsInput struct {
-	RetentionDays  *int      `json:"retention_days"`
-	RedactKeys     *[]string `json:"redact_keys"`
-	SetupCompleted *bool     `json:"setup_completed"`
-	MCPEnabled     *bool     `json:"mcp_enabled"`
+	RetentionDays         *int      `json:"retention_days"`
+	RedactKeys            *[]string `json:"redact_keys"`
+	SetupCompleted        *bool     `json:"setup_completed"`
+	MCPEnabled            *bool     `json:"mcp_enabled"`
+	OpenRouterAPIKey      *string   `json:"openrouter_api_key"`
+	ClearOpenRouterAPIKey bool      `json:"clear_openrouter_api_key"`
+	OpenRouterModel       *string   `json:"openrouter_model"`
 }
+
+var openRouterModelID = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+$`)
 
 // mcpEnabled reads the MCP switch; it defaults to on.
 func (s *Server) mcpEnabled(ctx context.Context) (bool, error) {
@@ -641,8 +655,21 @@ func (s *Server) readSettings(ctx context.Context) (settingsResponse, error) {
 		return out, err
 	}
 	out.MCPTokenSet = s.Config.MCPToken != ""
-	out.MCPEnabled, err = s.mcpEnabled(ctx)
-	return out, err
+	if out.MCPEnabled, err = s.mcpEnabled(ctx); err != nil {
+		return out, err
+	}
+	provider, err := s.Settings.OpenRouterConfig(ctx, s.Config.OpenRouterAPIKey, s.Config.OpenRouterModel)
+	if err != nil {
+		hasSecret, hasErr := s.Settings.HasSecret(ctx, settings.KeyOpenRouterAPIKey)
+		if hasErr != nil {
+			return out, hasErr
+		}
+		out.OpenRouterAPIKeyError = hasSecret
+	}
+	out.OpenRouterAPIKeySet = provider.APIKey != "" || out.OpenRouterAPIKeyError
+	out.OpenRouterAPIKeySource = provider.KeySource
+	out.OpenRouterModel = provider.Model
+	return out, nil
 }
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
@@ -660,6 +687,37 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	if in.ClearOpenRouterAPIKey && in.OpenRouterAPIKey != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid", "provide a new OpenRouter key or clear the saved key, not both")
+		return
+	}
+	var openRouterAPIKey string
+	if in.OpenRouterAPIKey != nil {
+		openRouterAPIKey = strings.TrimSpace(*in.OpenRouterAPIKey)
+		if len(openRouterAPIKey) < 10 || len(openRouterAPIKey) > 512 {
+			writeError(w, http.StatusUnprocessableEntity, "invalid", "openrouter_api_key must contain between 10 and 512 characters")
+			return
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		err := s.openRouterClient().ValidateAPIKey(checkCtx, openRouterAPIKey)
+		cancel()
+		if errors.Is(err, openrouter.ErrInvalidAPIKey) {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_openrouter_key", "OpenRouter rejected this API key")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "openrouter_unavailable", "could not validate the OpenRouter key; try again")
+			return
+		}
+	}
+	var openRouterModel string
+	if in.OpenRouterModel != nil {
+		openRouterModel = strings.TrimSpace(*in.OpenRouterModel)
+		if len(openRouterModel) > 200 || !openRouterModelID.MatchString(openRouterModel) {
+			writeError(w, http.StatusUnprocessableEntity, "invalid", "openrouter_model must be a valid provider/model id")
+			return
+		}
+	}
 	if in.RetentionDays != nil {
 		if *in.RetentionDays < 0 || *in.RetentionDays > 3650 {
 			writeError(w, http.StatusUnprocessableEntity, "invalid", "retention_days must be between 0 (unlimited) and 3650")
@@ -699,12 +757,46 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		s.Log.Info("settings.mcp", "enabled", *in.MCPEnabled)
 	}
+	if in.ClearOpenRouterAPIKey {
+		if err := s.Settings.DeleteSecret(ctx, settings.KeyOpenRouterAPIKey); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+	if in.OpenRouterAPIKey != nil {
+		if err := s.Settings.SetSecret(ctx, settings.KeyOpenRouterAPIKey, openRouterAPIKey); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+	if in.OpenRouterModel != nil {
+		if err := s.Settings.Set(ctx, settings.KeyOpenRouterModel, openRouterModel); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
 	out, err := s.readSettings(ctx)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) openRouterClient() *openrouter.Client {
+	if s.OpenRouter != nil {
+		return s.OpenRouter
+	}
+	return openrouter.NewClient()
+}
+
+func (s *Server) listOpenRouterModels(w http.ResponseWriter, r *http.Request) {
+	models, err := s.openRouterClient().ListModels(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "openrouter_unavailable", "could not load the OpenRouter model catalog")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": models})
 }
 
 // ---- events ----
@@ -1267,7 +1359,15 @@ func (s *Server) supportTriageStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	counts := map[string]int{"pending": 0, "processing": 0, "matched": 0, "ignored": 0}
+	counts := struct {
+		Pending     int    `json:"pending"`
+		Processing  int    `json:"processing"`
+		Matched     int    `json:"matched"`
+		Ignored     int    `json:"ignored"`
+		Configured  bool   `json:"configured"`
+		ConfigError bool   `json:"configuration_error"`
+		Model       string `json:"model"`
+	}{}
 	for rows.Next() {
 		var state string
 		var count int
@@ -1275,12 +1375,32 @@ func (s *Server) supportTriageStatus(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err)
 			return
 		}
-		counts[state] = count
+		switch state {
+		case "pending":
+			counts.Pending = count
+		case "processing":
+			counts.Processing = count
+		case "matched":
+			counts.Matched = count
+		case "ignored":
+			counts.Ignored = count
+		}
 	}
 	if err := rows.Err(); err != nil {
 		s.fail(w, err)
 		return
 	}
+	provider, err := s.Settings.OpenRouterConfig(r.Context(), s.Config.OpenRouterAPIKey, s.Config.OpenRouterModel)
+	if err != nil {
+		hasSecret, hasErr := s.Settings.HasSecret(r.Context(), settings.KeyOpenRouterAPIKey)
+		if hasErr != nil {
+			s.fail(w, hasErr)
+			return
+		}
+		counts.ConfigError = hasSecret
+	}
+	counts.Configured = provider.APIKey != ""
+	counts.Model = provider.Model
 	writeJSON(w, http.StatusOK, counts)
 }
 

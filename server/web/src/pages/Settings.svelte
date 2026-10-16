@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, type Status, type Settings, type Project, type Delivery, type Silence, type SilenceField } from '../lib/api'
+  import { api, type Status, type Settings, type SettingsPatch, type Project, type Delivery, type Silence, type SilenceField, type OpenRouterModel } from '../lib/api'
   import { relative, duration, retentionLabel, compact } from '../lib/format'
   import Card from '../lib/ui/Card.svelte'
   import Button from '../lib/ui/Button.svelte'
@@ -19,6 +19,14 @@
   let settings = $state<Settings | null>(null)
   let projects = $state<Project[]>([])
   let error = $state('')
+  let aiModels = $state<OpenRouterModel[]>([])
+  let aiModelsLoading = $state(false)
+  let aiModelError = $state('')
+  let aiKeyDraft = $state('')
+  let aiModelDraft = $state('')
+  let aiModelSearch = $state('')
+  let aiSaving = $state(false)
+  let aiNotice = $state('')
   let testing = $state(false)
   let testResult = $state<{ deliveries: Delivery[]; apns_configured: boolean } | null>(null)
   let newKey = $state('')
@@ -64,8 +72,9 @@
   async function load() {
     try {
       ;[status, settings] = await Promise.all([api.status(), api.settings()])
+      aiModelDraft = settings.openrouter_model
       projects = (await api.projects()).projects
-      await loadSilences()
+      await Promise.all([loadSilences(), loadOpenRouterModels()])
     } catch (e: any) {
       error = e.message
     }
@@ -87,6 +96,54 @@
       settings = await api.updateSettings({ retention_days: Number(v) })
     } catch (e: any) {
       error = e.message
+    }
+  }
+
+  async function loadOpenRouterModels() {
+    aiModelsLoading = true
+    aiModelError = ''
+    try {
+      aiModels = (await api.openRouterModels()).models
+    } catch (e: any) {
+      aiModelError = e.message
+    } finally {
+      aiModelsLoading = false
+    }
+  }
+
+  async function saveAISettings() {
+    if (!settings || !aiModelDraft) return
+    aiSaving = true
+    aiNotice = ''
+    error = ''
+    const key = aiKeyDraft.trim()
+    const patch: SettingsPatch = { openrouter_model: aiModelDraft }
+    if (key) patch.openrouter_api_key = key
+    try {
+      settings = await api.updateSettings(patch)
+      aiKeyDraft = ''
+      aiNotice = key ? 'OpenRouter key validated and saved. The worker will use it on the next triage cycle.' : 'Model saved. The worker will use it on the next triage cycle.'
+    } catch (e: any) {
+      error = e.message
+    } finally {
+      aiSaving = false
+    }
+  }
+
+  async function clearAIKey() {
+    aiSaving = true
+    aiNotice = ''
+    error = ''
+    try {
+      settings = await api.updateSettings({ clear_openrouter_api_key: true })
+      aiKeyDraft = ''
+      aiNotice = settings.openrouter_api_key_set
+        ? 'Saved key removed. Boop is still using the OpenRouter key from its environment.'
+        : 'Saved key removed. Add an OpenRouter key to resume triage.'
+    } catch (e: any) {
+      error = e.message
+    } finally {
+      aiSaving = false
     }
   }
 
@@ -131,6 +188,24 @@
     { value: '90', label: '90 days' },
     { value: '0', label: 'Unlimited' },
   ]
+  const filteredAIModels = $derived(aiModels.filter((model) => {
+    const query = aiModelSearch.trim().toLowerCase()
+    return !query || `${model.name} ${model.id}`.toLowerCase().includes(query)
+  }))
+  const aiModelOptions = $derived.by(() => {
+    const options = filteredAIModels.map((model) => ({
+      value: model.id,
+      label: `${model.name} · ${model.id}`,
+    }))
+    if (aiModelDraft && !options.some((option) => option.value === aiModelDraft)) {
+      options.unshift({ value: aiModelDraft, label: `Current: ${aiModelDraft}` })
+    }
+    return options
+  })
+  const selectedAIModel = $derived(aiModels.find((model) => model.id === aiModelDraft) ?? null)
+  function modelPrice(value: number) {
+    return `$${value.toLocaleString('en-US', { maximumFractionDigits: 4 })}`
+  }
   const lastPush = $derived(status?.last_push ?? null)
   const origin = typeof location !== 'undefined' ? location.origin : ''
 </script>
@@ -238,6 +313,51 @@
   {/if}
 
   {#if settings}
+    <Card title="AI support triage">
+      <p class="secondary lead">One OpenRouter key and model are used to review notifications from every Boop project. Saving a key validates authentication only; it does not run a model completion.</p>
+      <div class="ai-fields">
+        <label class="ai-field">
+          <span class="k">OpenRouter API key</span>
+          <Input type="password" bind:value={aiKeyDraft} placeholder={settings.openrouter_api_key_source === 'settings' ? 'Saved securely · leave blank to keep it' : settings.openrouter_api_key_source === 'environment' ? 'Set in deployment environment · leave blank to keep it' : 'Paste a rotated OpenRouter key'} autocomplete="new-password" autocapitalize="none" spellcheck="false" aria-label="OpenRouter API key" />
+          <span class="muted caption">
+            {#if settings.openrouter_api_key_error}
+              The saved key could not be decrypted. Enter a replacement key or remove the saved key to recover.
+            {:else if settings.openrouter_api_key_set}
+              Key configured via {settings.openrouter_api_key_source === 'environment' ? 'deployment environment' : 'Settings'}; Boop never sends it back to the browser.
+            {:else}
+              The key is encrypted on the server and is never stored in browser storage.
+            {/if}
+          </span>
+        </label>
+        <div class="ai-field">
+          <label class="k" for="ai-model-search">Find a model</label>
+          <Input id="ai-model-search" bind:value={aiModelSearch} placeholder="Search model or provider" aria-label="Search OpenRouter models" />
+          {#if aiModels.length > 0}
+            <Select bind:value={aiModelDraft} options={aiModelOptions} style="width: 100%" aria-label="OpenRouter model" />
+          {:else}
+            <Input bind:value={aiModelDraft} placeholder="provider/model-id" aria-label="OpenRouter model id" mono />
+          {/if}
+          {#if selectedAIModel && selectedAIModel.input_price_per_million !== null && selectedAIModel.output_price_per_million !== null}
+            <span class="muted caption">Per 1M tokens: {modelPrice(selectedAIModel.input_price_per_million)} input · {modelPrice(selectedAIModel.output_price_per_million)} output</span>
+          {:else if selectedAIModel}
+            <span class="muted caption">Published prices are unavailable for this model.</span>
+          {:else}
+            <span class="muted caption">Current model: {aiModelDraft || 'not selected'}</span>
+          {/if}
+          {#if aiModelsLoading}<span class="muted caption">Loading model catalog…</span>{/if}
+          {#if aiModelError}<span class="model-error">Could not load OpenRouter models. You can enter a provider/model id above.</span>{/if}
+        </div>
+      </div>
+      <p class="muted caption ai-cost">Saving a key starts reviewing all queued and future notifications. OpenRouter may charge for model usage at the selected model’s published token prices.</p>
+      {#if aiNotice}<div class="ai-notice" aria-live="polite"><Notice tone="good">{aiNotice}</Notice></div>{/if}
+      <div class="row ai-actions">
+        <Button onclick={saveAISettings} disabled={aiSaving || !aiModelDraft}>{aiSaving ? 'Saving…' : 'Save AI settings'}</Button>
+        {#if settings.openrouter_api_key_source === 'settings'}
+          <Button variant="danger" onclick={clearAIKey} disabled={aiSaving}>Remove saved key</Button>
+        {/if}
+      </div>
+    </Card>
+
     <Card title="Retention">
       <SettingRow label="Keep events for" hint="Older events are deleted automatically once an hour. Unlimited keeps everything. If BOOP_RETENTION_DAYS is set in the environment it overrides this on restart.">
         <Select value={String(settings.retention_days)} options={retentionOptions.some((o) => o.value === String(settings!.retention_days)) ? retentionOptions : [...retentionOptions, { value: String(settings.retention_days), label: `${settings.retention_days} days` }]} onchange={(e) => setRetention((e.currentTarget as HTMLSelectElement).value)} style="width: 150px" />
@@ -318,6 +438,13 @@
   .k { font: var(--up-type-caption); color: var(--up-text-muted); }
   .lead { font: var(--up-type-meta); line-height: 1.6; }
   .keys { display: flex; flex-wrap: wrap; gap: 8px; }
+  .ai-fields { display: grid; grid-template-columns: 1fr 1fr; gap: var(--up-space-4); margin-top: 16px; }
+  .ai-field { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .ai-field > :global(input), .ai-field > :global(span.wrap) { width: 100%; }
+  .ai-cost { margin-top: 12px; }
+  .ai-actions { margin-top: 14px; flex-wrap: wrap; }
+  .ai-notice { margin-top: 12px; }
+  .model-error { color: var(--up-outage-strong); font: var(--up-type-caption); }
   .sils { display: flex; flex-direction: column; gap: 6px; }
   .sil { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border-radius: var(--up-radius-control); transition: background 120ms ease-out; }
   .sil:hover { background: var(--up-bg-hover); }
@@ -331,5 +458,6 @@
   @media (max-width: 600px) {
     .metrics { grid-template-columns: 1fr 1fr; }
     .status { grid-template-columns: 1fr; }
+    .ai-fields { grid-template-columns: 1fr; }
   }
 </style>

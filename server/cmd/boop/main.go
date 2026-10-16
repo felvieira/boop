@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -22,8 +23,10 @@ import (
 	"github.com/chrisgreg/boop/server/internal/delivery"
 	"github.com/chrisgreg/boop/server/internal/devices"
 	"github.com/chrisgreg/boop/server/internal/events"
+	"github.com/chrisgreg/boop/server/internal/openrouter"
 	"github.com/chrisgreg/boop/server/internal/pairing"
 	"github.com/chrisgreg/boop/server/internal/projects"
+	"github.com/chrisgreg/boop/server/internal/secretbox"
 	"github.com/chrisgreg/boop/server/internal/settings"
 	"github.com/chrisgreg/boop/server/internal/silences"
 	"github.com/chrisgreg/boop/server/internal/support"
@@ -52,7 +55,22 @@ func run() error {
 	}
 	defer db.Close()
 
-	st := settings.New(db)
+	settingsWithoutBox := settings.New(db)
+	hasSavedOpenRouterKey, err := settingsWithoutBox.HasSecret(context.Background(), settings.KeyOpenRouterAPIKey)
+	if err != nil {
+		return fmt.Errorf("check saved OpenRouter setting: %w", err)
+	}
+	box, created, err := secretbox.OpenOrCreate(filepath.Join(filepath.Dir(cfg.DatabasePath), ".boop-settings-key"))
+	if err != nil {
+		return err
+	}
+	if created && hasSavedOpenRouterKey {
+		if err := settingsWithoutBox.DeleteSecret(context.Background(), settings.KeyOpenRouterAPIKey); err != nil {
+			return fmt.Errorf("reset unreadable OpenRouter setting: %w", err)
+		}
+		log.Warn("settings.openrouter_key_reset", "reason", "encryption key file was missing; enter a new key in Settings")
+	}
+	st := settings.New(db, box)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	// Retention: an explicit BOOP_RETENTION_DAYS wins; otherwise the UI-saved value (default 90) is kept.
@@ -102,13 +120,13 @@ func run() error {
 	eventHub := api.NewEventHub()
 	srv := &api.Server{
 		Config: cfg, DB: db, Log: log, Settings: st,
-		Projects: projects.New(db), Devices: devStore, Pairing: pairing.New(db, devStore), Events: evStore, Silences: silences.New(db), Support: support.New(db),
+		Projects: projects.New(db), Devices: devStore, Pairing: pairing.New(db, devStore), Events: evStore, Silences: silences.New(db), Support: support.New(db), OpenRouter: openrouter.NewClient(),
 		Dispatcher: dispatcher, APNS: client, APNSError: apnsErr, WebPush: wpClient, EventHub: eventHub, Admin: admin, StartedAt: time.Now(), Web: web.Handler(),
 	}
 	triageDone := make(chan struct{})
 	go func() {
 		defer close(triageDone)
-		triage.New(db, srv.Support, cfg.OpenRouterAPIKey, cfg.OpenRouterModel, log).Run(ctx)
+		triage.New(db, srv.Support, st, cfg.OpenRouterAPIKey, cfg.OpenRouterModel, log).Run(ctx)
 	}()
 	defer func() {
 		stop()

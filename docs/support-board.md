@@ -4,7 +4,9 @@ Boop's **Support** tab reviews notifications from every connected project in fou
 
 Migration `0005_notification_triage.sql` queues every event already stored in Boop. A background worker discovers new events and processes both old and new notifications from the same durable queue. Failed OpenRouter calls are retried with backoff; card upserts use the event identity, so a retry cannot create a duplicate. The Support tab shows queue progress.
 
-Configure `OPENROUTER_API_KEY` in the Boop deployment environment. `BOOP_TRIAGE_MODEL` defaults to `google/gemini-3.8-flash`. Email and phone strings, name fields, and common credential fields are omitted from the model prompt. Full stored notification text is retained in the private card so the owner can review the source.
+Configure the global OpenRouter key and model in Boop **Settings → AI support triage**. Boop validates a new key with OpenRouter's key endpoint without running a model completion, encrypts it on the server, and never returns it to the browser. The model picker shows JSON-capable text models and their published input/output prices per million tokens. Saved UI settings take precedence over the optional `OPENROUTER_API_KEY` and `BOOP_TRIAGE_MODEL` environment fallbacks; the default model is `google/gemini-3.8-flash`.
+
+The encryption key is created next to the SQLite database with owner-only file permissions (by default, `/data/.boop-settings-key`). Keep that file with the database when backing up or restoring `/data`; if the key file is lost, Boop clears the unreadable saved provider key and asks for a new one in Settings. Email and phone strings, name fields, and common credential fields are omitted from the model prompt. Full stored notification text is retained in the private card so the owner can review the source.
 
 Boop only processes events already ingested into its notification database. It does not log in to or read a mailbox; an email source must already forward its message into Boop as a notification event.
 

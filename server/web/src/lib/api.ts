@@ -75,6 +75,16 @@ export interface SupportTriageStatus {
   processing: number
   matched: number
   ignored: number
+  configured: boolean
+  configuration_error: boolean
+  model: string
+}
+
+export interface OpenRouterModel {
+  id: string
+  name: string
+  input_price_per_million: number | null
+  output_price_per_million: number | null
 }
 
 export interface Device {
@@ -161,6 +171,15 @@ export interface Settings {
   setup_completed: boolean
   mcp_enabled: boolean
   mcp_token_set: boolean
+  openrouter_api_key_set: boolean
+  openrouter_api_key_source: '' | 'settings' | 'environment'
+  openrouter_api_key_error: boolean
+  openrouter_model: string
+}
+
+export type SettingsPatch = Partial<Settings> & {
+  openrouter_api_key?: string
+  clear_openrouter_api_key?: boolean
 }
 
 export class ApiError extends Error {
@@ -220,7 +239,8 @@ export const api = {
 
   status: () => request<Status>('GET', '/api/v1/status'),
   settings: () => request<Settings>('GET', '/api/v1/settings'),
-  updateSettings: (patch: Partial<Settings>) => request<Settings>('PATCH', '/api/v1/settings', patch),
+  updateSettings: (patch: SettingsPatch) => request<Settings>('PATCH', '/api/v1/settings', patch),
+  openRouterModels: () => request<{ models: OpenRouterModel[] }>('GET', '/api/v1/openrouter/models'),
 
   events: (params: { project?: string; level?: string; source?: string; fingerprint?: string; before?: string; limit?: number; silenced?: string; grouped?: boolean } = {}) => {
     const q = new URLSearchParams()

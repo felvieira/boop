@@ -4,6 +4,7 @@
   import Card from '../lib/ui/Card.svelte'
   import Empty from '../lib/ui/Empty.svelte'
   import Notice from '../lib/ui/Notice.svelte'
+  import { link } from '../lib/router.svelte'
 
   const lanes: { status: SupportStatus; label: string }[] = [
     { status: 'new', label: 'New' },
@@ -66,6 +67,11 @@
       AI triage: {triageStatus.pending + triageStatus.processing} notifications to review ·
       {triageStatus.matched} cards created · {triageStatus.ignored} routine notifications filtered out
     </p>
+    {#if triageStatus.configuration_error}
+      <Notice tone="bad">The saved OpenRouter key could not be read. Replace it or remove it in <a href="/settings" onclick={link}>Settings</a> to resume queued triage.</Notice>
+    {:else if !triageStatus.configured}
+      <Notice tone="warn">AI triage is paused because no OpenRouter key is configured. Add a key and choose a model in <a href="/settings" onclick={link}>Settings</a>; queued notifications will be reviewed automatically.</Notice>
+    {/if}
   {/if}
   {#if error}<Notice tone="bad">{error.includes('support_auth_required') ? 'The private support board is disabled. Configure BOOP_ADMIN_USER and BOOP_ADMIN_PASSWORD, then sign in.' : error}</Notice>{/if}
 
