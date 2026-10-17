@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +47,7 @@ type CardInput struct {
 	Product     string  `json:"product"`
 	Description string  `json:"description"`
 	Priority    string  `json:"priority"`
+	Category    string  `json:"category"`
 	DueAt       string  `json:"due_at"`
 	ListID      string  `json:"list_id"`
 	Labels      []Label `json:"labels"`
@@ -77,6 +79,10 @@ func normalizeCardInput(in CardInput) (CardInput, error) {
 	in.Title = strings.TrimSpace(in.Title)
 	in.Product = strings.TrimSpace(in.Product)
 	in.Priority = strings.TrimSpace(in.Priority)
+	in.Category = strings.ToLower(strings.TrimSpace(in.Category))
+	if in.Category == "" {
+		in.Category = "other"
+	}
 	in.Description = strings.TrimSpace(in.Description)
 	in.DueAt = strings.TrimSpace(in.DueAt)
 	if in.Priority == "" {
@@ -88,7 +94,7 @@ func normalizeCardInput(in CardInput) (CardInput, error) {
 	if in.Labels == nil {
 		in.Labels = []Label{}
 	}
-	if in.Title == "" || len(in.Title) > 500 || len(in.Product) > 200 || len(in.Description) > 200000 || !priorities[in.Priority] || !validLabels(in.Labels) {
+	if in.Title == "" || len(in.Title) > 500 || len(in.Product) > 200 || len(in.Description) > 200000 || !priorities[in.Priority] || !categories[in.Category] || !validLabels(in.Labels) {
 		return in, ErrInvalid
 	}
 	if in.DueAt != "" {
@@ -264,9 +270,20 @@ func (s *Store) CreateCard(ctx context.Context, input CardInput) (*Card, error) 
 	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(position),-1000)+1000 FROM support_cards WHERE list_id=? AND archived_at=''`, in.ListID).Scan(&position); err != nil {
 		return nil, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO support_cards(id,source_account,source_thread_id,source_message_id,product,title,sender,reported_at,original_text,status,list_id,position,description,due_at,priority,labels_json,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,'',?,?,?, ?,?,?,?,?,?,?,?)`, id, "manual@boop.local", id, id, in.Product, in.Title, now, "Created manually in the Boop board.", status, in.ListID, position, in.Description, in.DueAt, in.Priority, string(labels), now, now)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO support_cards(id,source_account,source_thread_id,source_message_id,product,title,sender,reported_at,original_text,status,list_id,position,description,due_at,priority,category,labels_json,review_state,reviewed_at,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,'',?,?,?, ?,?,?,?,?,?,?,'reviewed',?,?,?)`, id, "manual@boop.local", id, id, in.Product, in.Title, now, "Created manually in the Boop board.", status, in.ListID, position, in.Description, in.DueAt, in.Priority, in.Category, string(labels), now, now, now)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO support_card_audit(id,card_id,action,new_value,created_at) VALUES(?,?,'created',?,?)`, ids.New("cau"), id, in.Category, now); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
 	return s.Get(ctx, id)
@@ -278,8 +295,65 @@ func (s *Store) UpdateCard(ctx context.Context, id string, input CardEdit) (*Car
 		return nil, err
 	}
 	labels, _ := json.Marshal(in.Labels)
-	res, err := s.db.ExecContext(ctx, `UPDATE support_cards SET title=?,product=?,description=?,due_at=?,priority=?,labels_json=?,updated_at=? WHERE id=?`,
-		in.Title, in.Product, in.Description, in.DueAt, in.Priority, string(labels), ids.Now(), id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var currentCategory, currentPriority, aiCategory, aiPriority, product string
+	err = tx.QueryRowContext(ctx, `SELECT category,priority,ai_category,ai_priority,product FROM support_cards WHERE id=?`, id).Scan(&currentCategory, &currentPriority, &aiCategory, &aiPriority, &product)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	now := ids.Now()
+	if currentCategory != in.Category && aiCategory != "" {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO support_classification_feedback(id,card_id,field,predicted_value,corrected_value,product,created_at)
+			VALUES(?,?,'category',?,?,?,?) ON CONFLICT(card_id,field,predicted_value,corrected_value) DO NOTHING`, ids.New("fbk"), id, currentCategory, in.Category, product, now); err != nil {
+			return nil, err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO support_card_audit(id,card_id,action,field,old_value,new_value,created_at) VALUES(?,?,'classified','category',?,?,?)`, ids.New("cau"), id, currentCategory, in.Category, now); err != nil {
+			return nil, err
+		}
+	}
+	if currentPriority != in.Priority && aiPriority != "" {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO support_classification_feedback(id,card_id,field,predicted_value,corrected_value,product,created_at)
+			VALUES(?,?,'priority',?,?,?,?) ON CONFLICT(card_id,field,predicted_value,corrected_value) DO NOTHING`, ids.New("fbk"), id, currentPriority, in.Priority, product, now); err != nil {
+			return nil, err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO support_card_audit(id,card_id,action,field,old_value,new_value,created_at) VALUES(?,?,'classified','priority',?,?,?)`, ids.New("cau"), id, currentPriority, in.Priority, now); err != nil {
+			return nil, err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE support_cards SET title=?,product=?,description=?,due_at=?,priority=?,category=?,labels_json=?,
+		category_override=CASE WHEN ai_category<>'' THEN CASE WHEN ?=ai_category THEN 0 ELSE 1 END ELSE category_override END,
+		priority_override=CASE WHEN ai_priority<>'' THEN CASE WHEN ?=ai_priority THEN 0 ELSE 1 END ELSE priority_override END,
+		review_state=CASE WHEN category<>? OR priority<>? THEN 'reviewed' ELSE review_state END,
+		reviewed_at=CASE WHEN category<>? OR priority<>? THEN ? ELSE reviewed_at END,updated_at=? WHERE id=?`,
+		in.Title, in.Product, in.Description, in.DueAt, in.Priority, in.Category, string(labels), in.Category, in.Priority,
+		in.Category, in.Priority, in.Category, in.Priority, now, now, id)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO support_card_audit(id,card_id,action,created_at) VALUES(?,?,'edited',?)`, ids.New("cau"), id, now); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return s.Get(ctx, id)
+}
+
+func (s *Store) SetCardReviewed(ctx context.Context, id string) (*Card, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	now := ids.Now()
+	res, err := tx.ExecContext(ctx, `UPDATE support_cards SET review_state='reviewed',reviewed_at=?,updated_at=? WHERE id=?`, now, now, id)
 	if err != nil {
 		return nil, err
 	}
@@ -289,6 +363,12 @@ func (s *Store) UpdateCard(ctx context.Context, id string, input CardEdit) (*Car
 	}
 	if count == 0 {
 		return nil, ErrNotFound
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO support_card_audit(id,card_id,action,created_at) VALUES(?,?,'reviewed',?)`, ids.New("cau"), id, now); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
 	}
 	return s.Get(ctx, id)
 }
@@ -303,7 +383,8 @@ func (s *Store) MoveCard(ctx context.Context, id, listID string, position int) (
 	}
 	defer tx.Rollback()
 	var sourceList, status string
-	err = tx.QueryRowContext(ctx, `SELECT list_id FROM support_cards WHERE id=? AND archived_at=''`, id).Scan(&sourceList)
+	var oldPosition int
+	err = tx.QueryRowContext(ctx, `SELECT list_id,position FROM support_cards WHERE id=? AND archived_at=''`, id).Scan(&sourceList, &oldPosition)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
@@ -345,6 +426,15 @@ func (s *Store) MoveCard(ctx context.Context, id, listID string, position int) (
 			}
 		}
 	}
+	if sourceList != listID || oldPosition != position {
+		field, oldValue, newValue := "position", strconv.Itoa(oldPosition), strconv.Itoa(position)
+		if sourceList != listID {
+			field, oldValue, newValue = "list", sourceList, listID
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO support_card_audit(id,card_id,action,field,old_value,new_value,created_at) VALUES(?,?,'moved',?,?,?,?)`, ids.New("cau"), id, field, oldValue, newValue, now); err != nil {
+			return nil, err
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -369,25 +459,38 @@ func cardIDs(ctx context.Context, tx *sql.Tx, listID, except string) ([]string, 
 }
 
 func (s *Store) SetArchived(ctx context.Context, id string, archived bool) (*Card, error) {
-	var query string
-	var args []any
-	if archived {
-		query, args = `UPDATE support_cards SET archived_at=?,updated_at=? WHERE id=? AND archived_at=''`, []any{ids.Now(), ids.Now(), id}
-	} else {
-		query, args = `UPDATE support_cards SET archived_at='',position=(SELECT COALESCE(MAX(position),-1000)+1000 FROM support_cards c WHERE c.list_id=support_cards.list_id AND c.archived_at=''),updated_at=? WHERE id=? AND archived_at<>''`, []any{ids.Now(), id}
-	}
-	res, err := s.db.ExecContext(ctx, query, args...)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	count, err := res.RowsAffected()
-	if err != nil {
+	defer tx.Rollback()
+	var current string
+	if err = tx.QueryRowContext(ctx, `SELECT archived_at FROM support_cards WHERE id=?`, id).Scan(&current); err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	} else if err != nil {
 		return nil, err
 	}
-	if count == 0 {
-		if _, err := s.Get(ctx, id); err != nil {
+	changed := (archived && current == "") || (!archived && current != "")
+	if changed {
+		now := ids.Now()
+		if archived {
+			_, err = tx.ExecContext(ctx, `UPDATE support_cards SET archived_at=?,updated_at=? WHERE id=?`, now, now, id)
+		} else {
+			_, err = tx.ExecContext(ctx, `UPDATE support_cards SET archived_at='',position=(SELECT COALESCE(MAX(position),-1000)+1000 FROM support_cards c WHERE c.list_id=support_cards.list_id AND c.archived_at=''),updated_at=? WHERE id=?`, now, id)
+		}
+		if err != nil {
 			return nil, err
 		}
+		action := "archived"
+		if !archived {
+			action = "restored"
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO support_card_audit(id,card_id,action,created_at) VALUES(?,?,?,?)`, ids.New("cau"), id, action, now); err != nil {
+			return nil, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
 	}
 	return s.Get(ctx, id)
 }

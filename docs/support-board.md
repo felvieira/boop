@@ -49,3 +49,18 @@ Other endpoints, also requiring admin auth:
 - `GET /api/v1/support/cards/{id}/attachments/{attachment_id}` streams a private image.
 
 The web board polls for card changes every 30 seconds. It does not send email or access Gmail.
+
+## Prepared actions and approvals
+
+Card details can hold a GitHub issue draft, a customer reply draft, or a technical plan. Configure an encrypted GitHub personal access token in **Settings → GitHub issue approvals** and map each Boop product to an `owner/repository`. A card can override the mapped repository, and the action screen shows the destination and full issue content before the administrator confirms creation. The token needs Issues read and write access only to repositories used by the board.
+
+GitHub issues include a Boop action marker so retries can find an existing issue. If a request times out after GitHub may have accepted it, the action enters reconciliation; Boop checks recent issues before it offers a retry. The action history records the administrator, payload hash, result, error, and GitHub issue id. A retry after an uncertain result requires the administrator to confirm that no issue exists.
+
+Reply drafts can be approved and copied or opened in the user's email client. Boop never sends the reply. Approved technical plans become checklist items on that card. These actions and their history require the private Support admin authorization. Migration `0011_support_actions.sql` creates the action and audit tables.
+
+New endpoints:
+
+- `GET` and `POST /api/v1/support/cards/{id}/actions` list or prepare card actions.
+- `PATCH` and `DELETE /api/v1/support/actions/{id}` edit or cancel an unapproved draft.
+- `GET /api/v1/support/actions/{id}/history` reads its audit history.
+- `POST /api/v1/support/actions/{id}/approve-reply`, `/execute`, `/reconcile`, and `/authorize-retry` approve a reply, execute a confirmed issue/plan, reconcile GitHub, or explicitly authorize a retry.

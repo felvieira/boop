@@ -72,12 +72,77 @@ export interface EventPage {
 
 export interface SupportTriageStatus {
   pending: number
+  failed: number
   processing: number
   matched: number
   ignored: number
+  worker_state: 'idle' | 'running' | 'disabled' | 'error'
+  last_started_at: string
+  last_finished_at: string
+  next_run_at: string
+  last_error: string
   configured: boolean
   configuration_error: boolean
   model: string
+}
+
+export interface SupportTriagePreview {
+  model: string
+  prompt_version: string
+  include: boolean
+  category: string
+  priority: SupportPriority
+  confidence: number
+  title: string
+  summary: string
+  reason: string
+  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number; cost: number | null }
+}
+
+export interface SupportTriageEvent {
+  event_id: string
+  project_id: string
+  project: string
+  source: string
+  type: string
+  level: string
+  event_title: string
+  event_body: string
+  event_data: string
+  occurred_at: string
+  state: 'pending' | 'processing' | 'matched' | 'ignored'
+  category: string
+  priority: SupportPriority
+  title: string
+  digest: string
+  reason: string
+  confidence: number
+  model: string
+  prompt_version: string
+  attempts: number
+  next_attempt_at: string
+  lease_until: string
+  last_error: string
+  processed_at: string
+  card_id: string
+  card_list_id: string
+  card_status: SupportStatus | ''
+}
+
+export interface SupportTriageAuditEntry {
+  id: string
+  action: 'decision' | 'retry' | 'reprocess' | 'failure'
+  state: string
+  category: string
+  priority: SupportPriority
+  title: string
+  digest: string
+  reason: string
+  confidence: number
+  model: string
+  prompt_version: string
+  error: string
+  created_at: string
 }
 
 export interface OpenRouterModel {
@@ -149,21 +214,58 @@ export interface Status {
 
 export type SupportStatus = 'new' | 'in_progress' | 'blocked' | 'done'
 export type SupportPriority = 'low' | 'normal' | 'high' | 'urgent'
+export type SupportCategory = 'bug' | 'correction' | 'suggestion' | 'partnership' | 'customer_request' | 'internal_bug' | 'other'
+export type SupportReviewState = 'needs_review' | 'reviewed'
 export interface SupportLabel { name: string; color: 'purple' | 'blue' | 'green' | 'yellow' | 'orange' | 'red' | 'gray' }
 export interface SupportList { id: string; name: string; position: number; status: SupportStatus; is_default: boolean; created_at: string; updated_at: string }
 export interface SupportAttachment { id: string; filename: string; content_type: string; created_at: string }
 export interface SupportChecklistItem { id: string; text: string; done: boolean; position: number; created_at: string; updated_at: string }
 export interface SupportComment { id: string; body: string; author: string; created_at: string }
+export interface SupportCardAuditEntry { id: string; action: string; field: string; old_value: string; new_value: string; actor: string; created_at: string }
+export interface SupportRelatedCandidate { card_id: string; product: string; title: string; reported_at: string; match_count: number; match_reason: 'exact_reference' | 'similar_title' }
+export interface SupportCardLink { id: string; card_id: string; related_card_id: string; product: string; title: string; relation: 'related' | 'duplicate'; direction: 'related' | 'duplicate_of' | 'duplicated_by'; created_at: string }
 export interface SupportCard {
   id: string; source_account: string; source_thread_id: string; source_message_id: string
   product: string; title: string; sender: string; reported_at: string; original_text: string
-  status: SupportStatus; list_id: string; position: number; description: string; due_at: string; priority: SupportPriority
+  status: SupportStatus; list_id: string; position: number; description: string; due_at: string; priority: SupportPriority; category: SupportCategory
+  ai_category: SupportCategory | ''; ai_priority: SupportPriority | ''; ai_confidence: number; ai_reason: string
+  review_state: SupportReviewState; reviewed_at: string; category_override: boolean; priority_override: boolean
   labels: SupportLabel[]; archived_at: string; manual: boolean; comments_count: number
   checklist_done: number; checklist_total: number; created_at: string; updated_at: string
   attachments: SupportAttachment[]; checklist: SupportChecklistItem[]; comments: SupportComment[]
 }
 export interface SupportCardDraft {
-  title: string; product: string; description: string; priority: SupportPriority; due_at: string; list_id: string; labels: SupportLabel[]
+  title: string; product: string; description: string; priority: SupportPriority; category: SupportCategory; due_at: string; list_id: string; labels: SupportLabel[]
+}
+export interface SupportClassificationRule {
+  id: string; name: string; product: string; field: 'category' | 'priority'; when_value: SupportCategory | SupportPriority
+  set_value: SupportCategory | SupportPriority; enabled: boolean; dry_run: boolean; source: 'manual' | 'learned'; created_at: string; updated_at: string
+}
+export interface SupportRuleSuggestion {
+  product: string; field: 'category' | 'priority'; when_value: SupportCategory | SupportPriority
+  set_value: SupportCategory | SupportPriority; sample_count: number; last_seen_at: string
+}
+export interface SupportRuleSimulation { rule_id: string; match_count: number; sample_cards: string[] }
+export interface SupportRuleFiring {
+  id: string; rule_id: string; rule_name: string; event_id: string; card_id: string; product: string
+  field: 'category' | 'priority'; outcome: 'simulated' | 'applied'; before_value: string; after_value: string; reason: string; created_at: string
+}
+export interface SupportBoardFilter {
+  archived?: boolean; q?: string; product?: string; category?: SupportCategory; priority?: SupportPriority
+  list_id?: string; review_state?: SupportReviewState; from?: string; to?: string
+}
+export interface SupportMetricGroup { name: string; count: number }
+export interface SupportDailyDigest {
+  window_start: string; new_cards: number; new_partnership_leads: number
+  urgent_active: number; blocked_active: number; overdue_active: number
+}
+export interface SupportMetrics {
+  from: string; to: string; notifications_processed: number; matched: number; filtered: number
+  open_failures: number; retries: number; cards_created: number; manual_cards_created: number
+  human_corrections: number; ai_runs: number; prompt_tokens: number; completion_tokens: number
+  total_tokens: number; cost_usd: number | null; cost_measured_runs: number
+  average_run_duration_ms: number; by_product: SupportMetricGroup[]; by_category: SupportMetricGroup[]
+  filtered_by_reason: SupportMetricGroup[]; daily_digest: SupportDailyDigest
 }
 export interface SupportCardInput {
   source_account: string; source_thread_id: string; source_message_id: string
@@ -185,12 +287,33 @@ export interface Settings {
   openrouter_api_key_set: boolean
   openrouter_api_key_source: '' | 'settings' | 'environment'
   openrouter_api_key_error: boolean
+  github_token_set: boolean
+  github_token_error: boolean
+  github_repositories: Record<string, string>
   openrouter_model: string
+  support_triage_instructions: string
+  support_digest_enabled: boolean
+  support_digest_hour: number
 }
 
 export type SettingsPatch = Partial<Settings> & {
   openrouter_api_key?: string
   clear_openrouter_api_key?: boolean
+  github_token?: string
+  clear_github_token?: boolean
+  github_repositories?: Record<string, string>
+}
+
+export type SupportActionKind = 'github_issue' | 'customer_reply' | 'technical_plan'
+export type SupportActionState = 'draft' | 'approved' | 'executing' | 'completed' | 'failed' | 'needs_reconciliation' | 'cancelled'
+export interface SupportActionInput { kind: SupportActionKind; destination: string; title: string; body: string }
+export interface SupportAction extends SupportActionInput {
+  id: string; card_id: string; state: SupportActionState; external_id: string; external_url: string; error: string
+  approved_by: string; approved_at: string; completed_at: string; created_at: string; updated_at: string
+}
+export interface SupportActionAuditEntry {
+  id: string; action: string; actor: string; summary: string; payload_sha256: string
+  external_id: string; result: string; error: string; created_at: string
 }
 
 export class ApiError extends Error {
@@ -229,9 +352,52 @@ export function setLoginHandler(fn: () => void) {
 export const api = {
   me: () => request<AuthState>('GET', '/api/v1/auth/me'),
   supportCards: () => request<{ cards: SupportCard[] }>('GET', '/api/v1/support/cards'),
-  supportBoard: (archived = false) => request<{ lists: SupportList[]; cards: SupportCard[] }>('GET', `/api/v1/support/board${archived ? '?archived=true' : ''}`),
+  supportBoard: (filters: SupportBoardFilter = {}) => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
+    return request<{ lists: SupportList[]; cards: SupportCard[] }>('GET', `/api/v1/support/board?${params.toString()}`)
+  },
+  supportMetrics: (from?: string, to?: string) => {
+    const params = new URLSearchParams()
+    if (from) params.set('from', from)
+    if (to) params.set('to', to)
+    return request<SupportMetrics>('GET', `/api/v1/support/metrics?${params.toString()}`)
+  },
+  supportExportURL: (filters: SupportBoardFilter = {}, format: 'csv' | 'json' = 'csv') => {
+    const params = new URLSearchParams({ format })
+    for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
+    return `/api/v1/support/export?${params.toString()}`
+  },
   supportCard: (id: string) => request<SupportCard>('GET', `/api/v1/support/cards/${encodeURIComponent(id)}`),
+  supportCardHistory: (id: string) => request<{ history: SupportCardAuditEntry[] }>('GET', `/api/v1/support/cards/${encodeURIComponent(id)}/history`),
+  supportActions: (cardId: string) => request<{ actions: SupportAction[] }>('GET', `/api/v1/support/cards/${encodeURIComponent(cardId)}/actions`),
+  supportActionHistory: (id: string) => request<{ history: SupportActionAuditEntry[] }>('GET', `/api/v1/support/actions/${encodeURIComponent(id)}/history`),
+  createSupportAction: (cardId: string, input: SupportActionInput) => request<SupportAction>('POST', `/api/v1/support/cards/${encodeURIComponent(cardId)}/actions`, input),
+  updateSupportAction: (id: string, input: SupportActionInput) => request<SupportAction>('PATCH', `/api/v1/support/actions/${encodeURIComponent(id)}`, input),
+  cancelSupportAction: (id: string) => request<void>('DELETE', `/api/v1/support/actions/${encodeURIComponent(id)}`),
+  approveSupportReply: (id: string) => request<SupportAction>('POST', `/api/v1/support/actions/${encodeURIComponent(id)}/approve-reply`, { confirm: true }),
+  executeSupportAction: (id: string) => request<SupportAction>('POST', `/api/v1/support/actions/${encodeURIComponent(id)}/execute`, { confirm: true }),
+  reconcileSupportAction: (id: string) => request<{ found: boolean; action: SupportAction }>('POST', `/api/v1/support/actions/${encodeURIComponent(id)}/reconcile`, {}),
+  authorizeSupportActionRetry: (id: string) => request<SupportAction>('POST', `/api/v1/support/actions/${encodeURIComponent(id)}/authorize-retry`, { confirm_not_created: true }),
+  supportCardRelated: (id: string) => request<{ links: SupportCardLink[]; suggestions: SupportRelatedCandidate[] }>('GET', `/api/v1/support/cards/${encodeURIComponent(id)}/related`),
+  createSupportCardLink: (id: string, target_card_id: string, relation: SupportCardLink['relation']) => request<{ links: SupportCardLink[]; suggestions: SupportRelatedCandidate[] }>('POST', `/api/v1/support/cards/${encodeURIComponent(id)}/links`, { target_card_id, relation }),
+  deleteSupportCardLink: (id: string, link_id: string) => request<void>('DELETE', `/api/v1/support/cards/${encodeURIComponent(id)}/links/${encodeURIComponent(link_id)}`),
+  reviewSupportCard: (id: string) => request<SupportCard>('POST', `/api/v1/support/cards/${encodeURIComponent(id)}/review`),
   supportTriageStatus: () => request<SupportTriageStatus>('GET', '/api/v1/support/triage/status'),
+  previewSupportTriage: () => request<SupportTriagePreview>('POST', '/api/v1/support/triage/preview'),
+  supportTriageEvents: (filters: { state?: string; q?: string; limit?: number; offset?: number } = {}) => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
+    return request<{ events: SupportTriageEvent[]; total: number; limit: number; offset: number }>('GET', `/api/v1/support/triage/events?${params.toString()}`)
+  },
+  supportTriageHistory: (id: string) => request<{ history: SupportTriageAuditEntry[] }>('GET', `/api/v1/support/triage/events/${encodeURIComponent(id)}/history`),
+  retrySupportTriageEvent: (id: string, reprocess = false) => request<{ event_id: string; state: 'pending'; action: 'retry' | 'reprocess'; next_attempt_at: string }>('POST', `/api/v1/support/triage/events/${encodeURIComponent(id)}/retry`, { reprocess }),
+  supportClassificationRules: () => request<{ rules: SupportClassificationRule[]; suggestions: SupportRuleSuggestion[] }>('GET', '/api/v1/support/classification/rules'),
+  supportRuleFirings: () => request<{ firings: SupportRuleFiring[] }>('GET', '/api/v1/support/classification/firings'),
+  createSupportClassificationRule: (input: Omit<SupportClassificationRule, 'id' | 'enabled' | 'dry_run' | 'created_at' | 'updated_at'>) => request<SupportClassificationRule>('POST', '/api/v1/support/classification/rules', input),
+  updateSupportClassificationRule: (id: string, input: Omit<SupportClassificationRule, 'id' | 'created_at' | 'updated_at'>) => request<SupportClassificationRule>('PATCH', `/api/v1/support/classification/rules/${encodeURIComponent(id)}`, input),
+  deleteSupportClassificationRule: (id: string) => request<void>('DELETE', `/api/v1/support/classification/rules/${encodeURIComponent(id)}`),
+  simulateSupportClassificationRule: (id: string) => request<SupportRuleSimulation>('POST', `/api/v1/support/classification/rules/${encodeURIComponent(id)}/simulate`),
   setSupportCardStatus: (id: string, status: SupportStatus) => request<SupportCard>('PATCH', `/api/v1/support/cards/${encodeURIComponent(id)}/status`, { status }),
   createSupportCard: (input: SupportCardDraft) => request<SupportCard>('POST', '/api/v1/support/cards', input),
   updateSupportCard: (id: string, input: SupportCardDraft) => request<SupportCard>('PATCH', `/api/v1/support/cards/${encodeURIComponent(id)}`, input),

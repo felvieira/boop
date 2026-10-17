@@ -14,15 +14,22 @@ import (
 
 // Well-known keys.
 const (
-	KeyRetentionDays    = "retention_days"
-	KeySetupCompleted   = "setup_completed"
-	KeyRedactKeys       = "redact_keys" // comma-separated, added to the built-in list
-	KeyMCPEnabled       = "mcp_enabled" // "false" turns the /mcp endpoint off; unset = on
-	KeyVAPIDPublicKey   = "vapid_public_key"
-	KeyVAPIDPrivateKey  = "vapid_private_key"
-	KeyVAPIDSubject     = "vapid_subject"
-	KeyOpenRouterAPIKey = "openrouter_api_key"
-	KeyOpenRouterModel  = "openrouter_model"
+	KeyRetentionDays             = "retention_days"
+	KeySetupCompleted            = "setup_completed"
+	KeyRedactKeys                = "redact_keys" // comma-separated, added to the built-in list
+	KeyMCPEnabled                = "mcp_enabled" // "false" turns the /mcp endpoint off; unset = on
+	KeyVAPIDPublicKey            = "vapid_public_key"
+	KeyVAPIDPrivateKey           = "vapid_private_key"
+	KeyVAPIDSubject              = "vapid_subject"
+	KeyOpenRouterAPIKey          = "openrouter_api_key"
+	KeyGitHubToken               = "github_api_token"
+	KeySupportGitHubRepositories = "support_github_repositories"
+	KeyOpenRouterModel           = "openrouter_model"
+	KeySupportTriageInstructions = "support_triage_instructions"
+	KeySupportDigestEnabled      = "support_digest_enabled"
+	KeySupportDigestHour         = "support_digest_hour"
+	KeySupportDigestLastDate     = "support_digest_last_date"
+	KeySupportDigestLastSentAt   = "support_digest_last_sent_at"
 )
 
 // Store reads and writes settings.

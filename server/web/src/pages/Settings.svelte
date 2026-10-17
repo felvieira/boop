@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, type Status, type Settings, type SettingsPatch, type Project, type Delivery, type Silence, type SilenceField, type OpenRouterModel } from '../lib/api'
+import { api, type Status, type Settings, type SettingsPatch, type Project, type Delivery, type Silence, type SilenceField, type OpenRouterModel, type SupportTriagePreview } from '../lib/api'
   import { relative, duration, retentionLabel, compact } from '../lib/format'
   import Card from '../lib/ui/Card.svelte'
   import Button from '../lib/ui/Button.svelte'
@@ -23,10 +23,22 @@
   let aiModelsLoading = $state(false)
   let aiModelError = $state('')
   let aiKeyDraft = $state('')
+  let githubTokenDraft = $state('')
+  let githubRepoMappings = $state<Record<string, string>>({})
+  let githubProductDraft = $state('')
+  let githubRepositoryDraft = $state('')
   let aiModelDraft = $state('')
   let aiModelSearch = $state('')
   let aiSaving = $state(false)
   let aiNotice = $state('')
+  let githubSaving = $state(false)
+  let githubRepoSaving = $state(false)
+  let githubNotice = $state('')
+  let triagePromptDraft = $state('')
+  let triageSaving = $state(false)
+  let triageTesting = $state(false)
+  let triagePreview = $state<SupportTriagePreview | null>(null)
+  let digestSaving = $state(false)
   let testing = $state(false)
   let testResult = $state<{ deliveries: Delivery[]; apns_configured: boolean } | null>(null)
   let newKey = $state('')
@@ -73,6 +85,8 @@
     try {
       ;[status, settings] = await Promise.all([api.status(), api.settings()])
       aiModelDraft = settings.openrouter_model
+      triagePromptDraft = settings.support_triage_instructions
+      githubRepoMappings = { ...(settings.github_repositories ?? {}) }
       projects = (await api.projects()).projects
       await Promise.all([loadSilences(), loadOpenRouterModels()])
     } catch (e: any) {
@@ -144,6 +158,129 @@
       error = e.message
     } finally {
       aiSaving = false
+    }
+  }
+
+  async function saveGitHubToken() {
+    const token = githubTokenDraft.trim()
+    if (!token) return
+    githubSaving = true
+    githubNotice = ''
+    error = ''
+    try {
+      settings = await api.updateSettings({ github_token: token })
+      githubTokenDraft = ''
+      githubNotice = 'GitHub token validated and saved encrypted. Issue drafts still require a separate approval on each card.'
+    } catch (e: any) {
+      error = e.message
+    } finally {
+      githubSaving = false
+    }
+  }
+
+  async function clearGitHubToken() {
+    githubSaving = true
+    githubNotice = ''
+    error = ''
+    try {
+      settings = await api.updateSettings({ clear_github_token: true })
+      githubTokenDraft = ''
+      githubNotice = 'Saved GitHub token removed. Existing drafts remain available for review.'
+    } catch (e: any) {
+      error = e.message
+    } finally {
+      githubSaving = false
+    }
+  }
+
+  async function saveGitHubRepoMappings(next: Record<string, string>) {
+    githubRepoSaving = true
+    githubNotice = ''
+    error = ''
+    try {
+      settings = await api.updateSettings({ github_repositories: next })
+      githubRepoMappings = { ...settings.github_repositories }
+      githubProductDraft = ''
+      githubRepositoryDraft = ''
+      githubNotice = 'Product-to-repository routing saved.'
+    } catch (e: any) {
+      error = e.message
+    } finally {
+      githubRepoSaving = false
+    }
+  }
+
+  async function addGitHubRepoMapping() {
+    const product = githubProductDraft.trim()
+    const repository = githubRepositoryDraft.trim()
+    if (!product || !repository) return
+    const next = { ...githubRepoMappings }
+    const existing = Object.keys(next).find((name) => name.toLowerCase() === product.toLowerCase())
+    if (existing) delete next[existing]
+    next[product] = repository
+    await saveGitHubRepoMappings(next)
+  }
+
+  async function removeGitHubRepoMapping(product: string) {
+    const next = { ...githubRepoMappings }
+    delete next[product]
+    await saveGitHubRepoMappings(next)
+  }
+
+  async function saveTriageInstructions() {
+    triageSaving = true
+    aiNotice = ''
+    error = ''
+    try {
+      settings = await api.updateSettings({ support_triage_instructions: triagePromptDraft.trim() })
+      triagePromptDraft = settings.support_triage_instructions
+      aiNotice = 'Triage instructions saved. The worker will use them on the next run.'
+    } catch (e: any) {
+      error = e.message
+    } finally {
+      triageSaving = false
+    }
+  }
+
+  async function restoreDefaultTriageInstructions() {
+    triagePromptDraft = ''
+    await saveTriageInstructions()
+  }
+
+  async function previewTriage() {
+    triageTesting = true
+    triagePreview = null
+    error = ''
+    try {
+      triagePreview = await api.previewSupportTriage()
+    } catch (e: any) {
+      error = e.message
+    } finally {
+      triageTesting = false
+    }
+  }
+
+  async function setDigestEnabled(enabled: boolean) {
+    digestSaving = true
+    error = ''
+    try {
+      settings = await api.updateSettings({ support_digest_enabled: enabled })
+    } catch (e: any) {
+      error = e.message
+    } finally {
+      digestSaving = false
+    }
+  }
+
+  async function setDigestHour(hour: string) {
+    digestSaving = true
+    error = ''
+    try {
+      settings = await api.updateSettings({ support_digest_hour: Number(hour) })
+    } catch (e: any) {
+      error = e.message
+    } finally {
+      digestSaving = false
     }
   }
 
@@ -356,6 +493,74 @@
           <Button variant="danger" onclick={clearAIKey} disabled={aiSaving}>Remove saved key</Button>
         {/if}
       </div>
+      <div class="triage-config">
+        <label class="ai-field" for="triage-instructions">
+          <span class="k">Global triage instructions</span>
+          <textarea id="triage-instructions" class="triage-prompt" bind:value={triagePromptDraft} maxlength="4000" rows="5" placeholder="Optional guidance for how Boop should recognize useful customer contacts and classify them."></textarea>
+          <span class="muted caption">These instructions guide all projects. The built-in privacy and output rules remain in force. Leave blank to use the default.</span>
+        </label>
+        <div class="row ai-actions">
+          <Button variant="secondary" onclick={saveTriageInstructions} disabled={triageSaving}>{triageSaving ? 'Saving…' : 'Save instructions'}</Button>
+          <Button variant="secondary" onclick={restoreDefaultTriageInstructions} disabled={triageSaving || !triagePromptDraft.trim()}>Restore default</Button>
+          <Button variant="secondary" onclick={previewTriage} disabled={triageTesting || !settings.openrouter_api_key_set}>{triageTesting ? 'Previewing…' : 'Preview with synthetic data'}</Button>
+        </div>
+        {#if triagePreview}
+          <div class="triage-preview" aria-live="polite">
+            <div class="row"><strong>{triagePreview.include ? 'Would create a card' : 'Would filter this notification'}</strong><span class="muted caption">{triagePreview.model} · {triagePreview.category} · {triagePreview.priority} · {Math.round(triagePreview.confidence * 100)}% confidence · prompt {triagePreview.prompt_version}</span></div>
+            <strong>{triagePreview.title}</strong>
+            <p>{triagePreview.summary}</p>
+            <span class="muted caption">{triagePreview.reason}</span>
+            <span class="muted caption">Preview usage: {triagePreview.usage.total_tokens} tokens{triagePreview.usage.cost === null ? ' · provider did not report cost' : ` · $${triagePreview.usage.cost.toFixed(6)}`}. Synthetic data only; no card was created.</span>
+          </div>
+        {/if}
+      </div>
+    </Card>
+
+    <Card title="GitHub issue approvals">
+      <p class="secondary lead">Boop can create a GitHub issue from a support card only after an administrator reviews and approves its destination, title, and body.</p>
+      <label class="ai-field">
+        <span class="k">GitHub personal access token</span>
+        <Input type="password" bind:value={githubTokenDraft} placeholder={settings.github_token_set ? 'Saved securely · leave blank to keep it' : 'Paste a token with Issues read/write access'} autocomplete="new-password" autocapitalize="none" spellcheck="false" aria-label="GitHub personal access token" />
+        <span class="muted caption">
+          {#if settings.github_token_error}
+            The saved token could not be decrypted. Enter a replacement token or remove the saved token to recover.
+          {:else if settings.github_token_set}
+            Token validated against GitHub, encrypted on this server, and never returned to the browser. Select the repository on each issue draft.
+          {:else}
+            Give the token Issues read/write access only to the repositories you plan to use. Boop validates it before saving.
+          {/if}
+        </span>
+      </label>
+      {#if githubNotice}<div class="ai-notice" aria-live="polite"><Notice tone="good">{githubNotice}</Notice></div>{/if}
+      <div class="row ai-actions">
+        <Button onclick={saveGitHubToken} disabled={githubSaving || !githubTokenDraft.trim()}>{githubSaving ? 'Saving…' : 'Save GitHub token'}</Button>
+        {#if settings.github_token_set}<Button variant="danger" onclick={clearGitHubToken} disabled={githubSaving}>Remove saved token</Button>{/if}
+      </div>
+      <div class="repo-routing">
+        <div><strong>Product routing</strong><p class="muted caption">New issue drafts use this destination when the product name matches. The card still requires approval.</p></div>
+        {#if Object.keys(githubRepoMappings).length}
+          <div class="repo-mappings">
+            {#each Object.entries(githubRepoMappings).sort(([a], [b]) => a.localeCompare(b)) as [product, repository] (product)}
+              <div class="repo-mapping"><span>{product}</span><code>{repository}</code><Button variant="danger" size="sm" onclick={() => removeGitHubRepoMapping(product)} disabled={githubRepoSaving}>Remove</Button></div>
+            {/each}
+          </div>
+        {/if}
+        <div class="repo-form">
+          <label class="ai-field"><span class="k">Boop product</span><Input bind:value={githubProductDraft} maxlength={200} placeholder="VisaLab" aria-label="Boop product name" /></label>
+          <label class="ai-field"><span class="k">GitHub repository</span><Input bind:value={githubRepositoryDraft} placeholder="felvieira/visalab" aria-label="GitHub repository mapping" /></label>
+          <Button variant="secondary" onclick={addGitHubRepoMapping} disabled={githubRepoSaving || !githubProductDraft.trim() || !githubRepositoryDraft.trim()}>{githubRepoSaving ? 'Saving…' : 'Save mapping'}</Button>
+        </div>
+      </div>
+    </Card>
+
+    <Card title="Daily support digest">
+      <p class="secondary lead">A short daily push summarizes new or updated support cards and highlights urgent, blocked, overdue, and partnership items. It is calculated from the board without an AI call.</p>
+      <SettingRow label="Send digest" hint="The digest is sent to paired devices with push enabled. Partial failures retry without repeating deliveries that already succeeded. Time zone: America/Sao_Paulo.">
+        <Switch checked={settings.support_digest_enabled} disabled={digestSaving} onchange={setDigestEnabled} label="Daily support digest" />
+      </SettingRow>
+      <SettingRow label="Delivery time" hint="Choose the hour when the daily digest may be sent.">
+        <Select value={String(settings.support_digest_hour)} options={Array.from({ length: 24 }, (_, hour) => ({ value: String(hour), label: `${String(hour).padStart(2, '0')}:00` }))} onchange={(e) => setDigestHour((e.currentTarget as HTMLSelectElement).value)} style="width: 120px" />
+      </SettingRow>
     </Card>
 
     <Card title="Retention">
@@ -444,6 +649,18 @@
   .ai-cost { margin-top: 12px; }
   .ai-actions { margin-top: 14px; flex-wrap: wrap; }
   .ai-notice { margin-top: 12px; }
+  .repo-routing { display: grid; gap: 12px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--up-border-hairline); }
+  .repo-routing strong { font: var(--up-type-ui); color: var(--up-text); }
+  .repo-mappings { display: grid; gap: 6px; }
+  .repo-mapping { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--up-radius-control); background: var(--up-bg-hover); font: var(--up-type-meta); }
+  .repo-mapping span { flex: 1; }
+  .repo-mapping code { color: var(--up-text-muted); }
+  .repo-form { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+  .repo-form .ai-field { flex: 1; min-width: 180px; }
+  .triage-config { display: flex; flex-direction: column; gap: 8px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--up-border-hairline); }
+  .triage-prompt { width: 100%; resize: vertical; border: 1px solid var(--up-border-control); border-radius: var(--up-radius-control); background: var(--up-bg); color: var(--up-text); padding: 10px 12px; font: var(--up-type-meta); line-height: 1.5; }
+  .triage-preview { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; padding: 14px; border-radius: var(--up-radius-card); background: var(--up-bg-hover); font: var(--up-type-meta); }
+  .triage-preview p { margin: 0; }
   .model-error { color: var(--up-outage-strong); font: var(--up-type-caption); }
   .sils { display: flex; flex-direction: column; gap: 6px; }
   .sil { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border-radius: var(--up-radius-control); transition: background 120ms ease-out; }

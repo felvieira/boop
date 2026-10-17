@@ -124,9 +124,11 @@ func run() error {
 		Dispatcher: dispatcher, APNS: client, APNSError: apnsErr, WebPush: wpClient, EventHub: eventHub, Admin: admin, StartedAt: time.Now(), Web: web.Handler(),
 	}
 	triageDone := make(chan struct{})
+	triageWorker := triage.New(db, srv.Support, st, cfg.OpenRouterAPIKey, cfg.OpenRouterModel, log)
+	triageWorker.SetDigestSender(dispatcher.BroadcastOnce)
 	go func() {
 		defer close(triageDone)
-		triage.New(db, srv.Support, st, cfg.OpenRouterAPIKey, cfg.OpenRouterModel, log).Run(ctx)
+		triageWorker.Run(ctx)
 	}()
 	defer func() {
 		stop()

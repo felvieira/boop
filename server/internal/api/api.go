@@ -166,6 +166,8 @@ func (s *Server) Handler() http.Handler {
 	// AI-curated support cards and their private image attachments. These require
 	// configured admin auth even if the rest of Boop is deployed open.
 	mux.Handle("GET /api/v1/support/board", s.supportAuth(s.getSupportBoard))
+	mux.Handle("GET /api/v1/support/metrics", s.supportAuth(s.supportMetrics))
+	mux.Handle("GET /api/v1/support/export", s.supportAuth(s.exportSupport))
 	mux.Handle("GET /api/v1/support/lists", s.supportAuth(s.listSupportLists))
 	mux.Handle("POST /api/v1/support/lists", s.supportAuth(s.createSupportList))
 	mux.Handle("PATCH /api/v1/support/lists/{id}", s.supportAuth(s.updateSupportList))
@@ -173,7 +175,21 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/support/cards", s.supportAuth(s.listSupportCards))
 	mux.Handle("POST /api/v1/support/cards", s.supportAuth(s.createSupportCard))
 	mux.Handle("GET /api/v1/support/cards/{id}", s.supportAuth(s.getSupportCard))
+	mux.Handle("GET /api/v1/support/cards/{id}/history", s.supportAuth(s.supportCardHistory))
+	mux.Handle("GET /api/v1/support/cards/{id}/actions", s.supportAuth(s.listSupportActions))
+	mux.Handle("POST /api/v1/support/cards/{id}/actions", s.supportAuth(s.createSupportAction))
+	mux.Handle("GET /api/v1/support/actions/{id}/history", s.supportAuth(s.supportActionHistory))
+	mux.Handle("PATCH /api/v1/support/actions/{id}", s.supportAuth(s.updateSupportAction))
+	mux.Handle("DELETE /api/v1/support/actions/{id}", s.supportAuth(s.cancelSupportAction))
+	mux.Handle("POST /api/v1/support/actions/{id}/approve-reply", s.supportAuth(s.approveSupportReply))
+	mux.Handle("POST /api/v1/support/actions/{id}/execute", s.supportAuth(s.executeSupportAction))
+	mux.Handle("POST /api/v1/support/actions/{id}/reconcile", s.supportAuth(s.reconcileSupportAction))
+	mux.Handle("POST /api/v1/support/actions/{id}/authorize-retry", s.supportAuth(s.authorizeSupportActionRetry))
+	mux.Handle("GET /api/v1/support/cards/{id}/related", s.supportAuth(s.supportRelatedCards))
+	mux.Handle("POST /api/v1/support/cards/{id}/links", s.supportAuth(s.createSupportCardLink))
+	mux.Handle("DELETE /api/v1/support/cards/{id}/links/{link_id}", s.supportAuth(s.deleteSupportCardLink))
 	mux.Handle("PATCH /api/v1/support/cards/{id}", s.supportAuth(s.updateSupportCard))
+	mux.Handle("POST /api/v1/support/cards/{id}/review", s.supportAuth(s.reviewSupportCard))
 	mux.Handle("POST /api/v1/support/cards/{id}/move", s.supportAuth(s.moveSupportCard))
 	mux.Handle("POST /api/v1/support/cards/{id}/archive", s.supportAuth(s.archiveSupportCard))
 	mux.Handle("POST /api/v1/support/cards/{id}/restore", s.supportAuth(s.restoreSupportCard))
@@ -185,6 +201,16 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/support/cards/{id}/attachments", s.supportAuth(s.addSupportAttachments))
 	mux.Handle("DELETE /api/v1/support/cards/{id}/attachments/{attachment_id}", s.supportAuth(s.deleteSupportAttachment))
 	mux.Handle("GET /api/v1/support/triage/status", s.supportAuth(s.supportTriageStatus))
+	mux.Handle("POST /api/v1/support/triage/preview", s.supportAuth(s.previewSupportTriage))
+	mux.Handle("GET /api/v1/support/triage/events", s.supportAuth(s.supportTriageEvents))
+	mux.Handle("GET /api/v1/support/triage/events/{id}/history", s.supportAuth(s.supportTriageHistory))
+	mux.Handle("POST /api/v1/support/triage/events/{id}/retry", s.supportAuth(s.retrySupportTriageEvent))
+	mux.Handle("GET /api/v1/support/classification/rules", s.supportAuth(s.listSupportClassificationRules))
+	mux.Handle("GET /api/v1/support/classification/firings", s.supportAuth(s.listSupportRuleFirings))
+	mux.Handle("POST /api/v1/support/classification/rules", s.supportAuth(s.createSupportClassificationRule))
+	mux.Handle("PATCH /api/v1/support/classification/rules/{id}", s.supportAuth(s.updateSupportClassificationRule))
+	mux.Handle("DELETE /api/v1/support/classification/rules/{id}", s.supportAuth(s.deleteSupportClassificationRule))
+	mux.Handle("POST /api/v1/support/classification/rules/{id}/simulate", s.supportAuth(s.simulateSupportClassificationRule))
 	mux.Handle("POST /api/v1/support/cards/upsert", s.supportIngestAuth(s.upsertSupportCard))
 	mux.Handle("PATCH /api/v1/support/cards/{id}/status", s.supportAuth(s.setSupportCardStatus))
 	mux.Handle("GET /api/v1/support/cards/{id}/attachments/{attachment_id}", s.supportAuth(s.getSupportAttachment))
@@ -625,27 +651,39 @@ func (s *Server) baseURL(r *http.Request) string {
 // ---- settings ----
 
 type settingsResponse struct {
-	RetentionDays          int      `json:"retention_days"`
-	RedactKeys             []string `json:"redact_keys"`
-	DefaultRedact          []string `json:"default_redact_keys"`
-	SetupCompleted         bool     `json:"setup_completed"`
-	MCPEnabled             bool     `json:"mcp_enabled"`
-	OpenRouterAPIKeySet    bool     `json:"openrouter_api_key_set"`
-	OpenRouterAPIKeySource string   `json:"openrouter_api_key_source"`
-	OpenRouterAPIKeyError  bool     `json:"openrouter_api_key_error"`
-	OpenRouterModel        string   `json:"openrouter_model"`
+	RetentionDays             int               `json:"retention_days"`
+	RedactKeys                []string          `json:"redact_keys"`
+	DefaultRedact             []string          `json:"default_redact_keys"`
+	SetupCompleted            bool              `json:"setup_completed"`
+	MCPEnabled                bool              `json:"mcp_enabled"`
+	OpenRouterAPIKeySet       bool              `json:"openrouter_api_key_set"`
+	OpenRouterAPIKeySource    string            `json:"openrouter_api_key_source"`
+	OpenRouterAPIKeyError     bool              `json:"openrouter_api_key_error"`
+	GitHubTokenSet            bool              `json:"github_token_set"`
+	GitHubTokenError          bool              `json:"github_token_error"`
+	GitHubRepositories        map[string]string `json:"github_repositories"`
+	OpenRouterModel           string            `json:"openrouter_model"`
+	SupportTriageInstructions string            `json:"support_triage_instructions"`
+	SupportDigestEnabled      bool              `json:"support_digest_enabled"`
+	SupportDigestHour         int               `json:"support_digest_hour"`
 	// MCPTokenSet reports whether BOOP_MCP_TOKEN is configured (never the token itself).
 	MCPTokenSet bool `json:"mcp_token_set"`
 }
 
 type settingsInput struct {
-	RetentionDays         *int      `json:"retention_days"`
-	RedactKeys            *[]string `json:"redact_keys"`
-	SetupCompleted        *bool     `json:"setup_completed"`
-	MCPEnabled            *bool     `json:"mcp_enabled"`
-	OpenRouterAPIKey      *string   `json:"openrouter_api_key"`
-	ClearOpenRouterAPIKey bool      `json:"clear_openrouter_api_key"`
-	OpenRouterModel       *string   `json:"openrouter_model"`
+	RetentionDays             *int               `json:"retention_days"`
+	RedactKeys                *[]string          `json:"redact_keys"`
+	SetupCompleted            *bool              `json:"setup_completed"`
+	MCPEnabled                *bool              `json:"mcp_enabled"`
+	OpenRouterAPIKey          *string            `json:"openrouter_api_key"`
+	ClearOpenRouterAPIKey     bool               `json:"clear_openrouter_api_key"`
+	GitHubToken               *string            `json:"github_token"`
+	ClearGitHubToken          bool               `json:"clear_github_token"`
+	GitHubRepositories        *map[string]string `json:"github_repositories"`
+	OpenRouterModel           *string            `json:"openrouter_model"`
+	SupportTriageInstructions *string            `json:"support_triage_instructions"`
+	SupportDigestEnabled      *bool              `json:"support_digest_enabled"`
+	SupportDigestHour         *int               `json:"support_digest_hour"`
 }
 
 var openRouterModelID = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+$`)
@@ -687,6 +725,38 @@ func (s *Server) readSettings(ctx context.Context) (settingsResponse, error) {
 	out.OpenRouterAPIKeySet = provider.APIKey != "" || out.OpenRouterAPIKeyError
 	out.OpenRouterAPIKeySource = provider.KeySource
 	out.OpenRouterModel = provider.Model
+	githubToken, githubErr := s.Settings.GetSecret(ctx, settings.KeyGitHubToken)
+	if githubErr != nil {
+		hasSecret, hasErr := s.Settings.HasSecret(ctx, settings.KeyGitHubToken)
+		if hasErr != nil {
+			return out, hasErr
+		}
+		out.GitHubTokenError = hasSecret
+	}
+	out.GitHubTokenSet = githubToken != "" || out.GitHubTokenError
+	out.GitHubRepositories = map[string]string{}
+	repositorySettings, err := s.Settings.Get(ctx, settings.KeySupportGitHubRepositories, "{}")
+	if err != nil {
+		return out, err
+	}
+	if err := json.Unmarshal([]byte(repositorySettings), &out.GitHubRepositories); err != nil {
+		return out, fmt.Errorf("decode support GitHub repository mappings: %w", err)
+	}
+	if out.GitHubRepositories == nil {
+		out.GitHubRepositories = map[string]string{}
+	}
+	if out.SupportTriageInstructions, err = s.Settings.Get(ctx, settings.KeySupportTriageInstructions, ""); err != nil {
+		return out, err
+	}
+	if out.SupportDigestEnabled, err = s.Settings.GetBool(ctx, settings.KeySupportDigestEnabled); err != nil {
+		return out, err
+	}
+	if out.SupportDigestHour, err = s.Settings.GetInt(ctx, settings.KeySupportDigestHour, 9); err != nil {
+		return out, err
+	}
+	if out.SupportDigestHour < 0 || out.SupportDigestHour > 23 {
+		out.SupportDigestHour = 9
+	}
 	return out, nil
 }
 
@@ -709,6 +779,30 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "invalid", "provide a new OpenRouter key or clear the saved key, not both")
 		return
 	}
+	if in.ClearGitHubToken && in.GitHubToken != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid", "provide a new GitHub token or clear the saved token, not both")
+		return
+	}
+	var githubRepositories map[string]string
+	if in.GitHubRepositories != nil {
+		if len(*in.GitHubRepositories) > 100 {
+			writeError(w, http.StatusUnprocessableEntity, "invalid", "github_repositories supports at most 100 product mappings")
+			return
+		}
+		githubRepositories = make(map[string]string, len(*in.GitHubRepositories))
+		seenProducts := make(map[string]bool, len(*in.GitHubRepositories))
+		for product, repository := range *in.GitHubRepositories {
+			product = strings.TrimSpace(product)
+			repository = strings.TrimSpace(repository)
+			canonicalProduct := strings.ToLower(product)
+			if product == "" || len([]rune(product)) > 200 || !support.ValidGitHubRepository(repository) || seenProducts[canonicalProduct] {
+				writeError(w, http.StatusUnprocessableEntity, "invalid_github_repositories", "each mapping needs a distinct product name and a valid owner/repository value")
+				return
+			}
+			seenProducts[canonicalProduct] = true
+			githubRepositories[product] = repository
+		}
+	}
 	var openRouterAPIKey string
 	if in.OpenRouterAPIKey != nil {
 		openRouterAPIKey = strings.TrimSpace(*in.OpenRouterAPIKey)
@@ -728,6 +822,25 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var githubToken string
+	if in.GitHubToken != nil {
+		githubToken = strings.TrimSpace(*in.GitHubToken)
+		if len(githubToken) < 10 || len(githubToken) > 512 {
+			writeError(w, http.StatusUnprocessableEntity, "invalid", "github_token must contain between 10 and 512 characters")
+			return
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		err := newGitHubIssueClient().validateToken(checkCtx, githubToken)
+		cancel()
+		if errors.Is(err, errInvalidGitHubToken) {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_github_token", "GitHub rejected this token")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "github_unavailable", "could not validate the GitHub token; try again")
+			return
+		}
+	}
 	var openRouterModel string
 	if in.OpenRouterModel != nil {
 		openRouterModel = strings.TrimSpace(*in.OpenRouterModel)
@@ -735,6 +848,14 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnprocessableEntity, "invalid", "openrouter_model must be a valid provider/model id")
 			return
 		}
+	}
+	if in.SupportTriageInstructions != nil && len([]rune(strings.TrimSpace(*in.SupportTriageInstructions))) > 4000 {
+		writeError(w, http.StatusUnprocessableEntity, "invalid", "support_triage_instructions must be at most 4000 characters")
+		return
+	}
+	if in.SupportDigestHour != nil && (*in.SupportDigestHour < 0 || *in.SupportDigestHour > 23) {
+		writeError(w, http.StatusUnprocessableEntity, "invalid", "support_digest_hour must be between 0 and 23")
+		return
 	}
 	if in.RetentionDays != nil {
 		if *in.RetentionDays < 0 || *in.RetentionDays > 3650 {
@@ -787,8 +908,49 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if in.ClearGitHubToken {
+		if err := s.Settings.DeleteSecret(ctx, settings.KeyGitHubToken); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+	if in.GitHubToken != nil {
+		if err := s.Settings.SetSecret(ctx, settings.KeyGitHubToken, githubToken); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+	if in.GitHubRepositories != nil {
+		encoded, err := json.Marshal(githubRepositories)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		if err := s.Settings.Set(ctx, settings.KeySupportGitHubRepositories, string(encoded)); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
 	if in.OpenRouterModel != nil {
 		if err := s.Settings.Set(ctx, settings.KeyOpenRouterModel, openRouterModel); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+	if in.SupportTriageInstructions != nil {
+		if err := s.Settings.Set(ctx, settings.KeySupportTriageInstructions, strings.TrimSpace(*in.SupportTriageInstructions)); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+	if in.SupportDigestEnabled != nil {
+		if err := s.Settings.Set(ctx, settings.KeySupportDigestEnabled, strconv.FormatBool(*in.SupportDigestEnabled)); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+	if in.SupportDigestHour != nil {
+		if err := s.Settings.Set(ctx, settings.KeySupportDigestHour, strconv.Itoa(*in.SupportDigestHour)); err != nil {
 			s.fail(w, err)
 			return
 		}
@@ -1376,7 +1538,11 @@ func (s *Server) getSupportBoard(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	cards, err := s.Support.ListWithArchived(r.Context(), r.URL.Query().Get("archived") == "true")
+	cards, err := s.Support.ListFiltered(r.Context(), supportFilterFromRequest(r))
+	if errors.Is(err, support.ErrInvalid) {
+		supportMutationError(w, s, err)
+		return
+	}
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -1486,6 +1652,15 @@ func (s *Server) updateSupportCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	card, err := s.Support.UpdateCard(r.Context(), r.PathValue("id"), in)
+	if err != nil {
+		supportMutationError(w, s, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, card)
+}
+
+func (s *Server) reviewSupportCard(w http.ResponseWriter, r *http.Request) {
+	card, err := s.Support.SetCardReviewed(r.Context(), r.PathValue("id"))
 	if err != nil {
 		supportMutationError(w, s, err)
 		return
@@ -1632,31 +1807,39 @@ func (s *Server) deleteSupportAttachment(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) supportTriageStatus(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.QueryContext(r.Context(), `SELECT state, COUNT(*) FROM notification_triage GROUP BY state`)
+	rows, err := s.DB.QueryContext(r.Context(), `SELECT state, COUNT(*), SUM(CASE WHEN last_error<>'' THEN 1 ELSE 0 END)
+		FROM notification_triage GROUP BY state`)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
 	defer rows.Close()
 	counts := struct {
-		Pending     int    `json:"pending"`
-		Processing  int    `json:"processing"`
-		Matched     int    `json:"matched"`
-		Ignored     int    `json:"ignored"`
-		Configured  bool   `json:"configured"`
-		ConfigError bool   `json:"configuration_error"`
-		Model       string `json:"model"`
+		Pending      int    `json:"pending"`
+		Failed       int    `json:"failed"`
+		Processing   int    `json:"processing"`
+		Matched      int    `json:"matched"`
+		Ignored      int    `json:"ignored"`
+		WorkerState  string `json:"worker_state"`
+		LastStarted  string `json:"last_started_at"`
+		LastFinished string `json:"last_finished_at"`
+		NextRun      string `json:"next_run_at"`
+		LastError    string `json:"last_error"`
+		Configured   bool   `json:"configured"`
+		ConfigError  bool   `json:"configuration_error"`
+		Model        string `json:"model"`
 	}{}
 	for rows.Next() {
 		var state string
-		var count int
-		if err := rows.Scan(&state, &count); err != nil {
+		var count, failed int
+		if err := rows.Scan(&state, &count, &failed); err != nil {
 			s.fail(w, err)
 			return
 		}
 		switch state {
 		case "pending":
-			counts.Pending = count
+			counts.Failed = failed
+			counts.Pending = count - failed
 		case "processing":
 			counts.Processing = count
 		case "matched":
@@ -1666,6 +1849,15 @@ func (s *Server) supportTriageStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := rows.Err(); err != nil {
+		s.fail(w, err)
+		return
+	}
+	if err := rows.Close(); err != nil {
+		s.fail(w, err)
+		return
+	}
+	if err := s.DB.QueryRowContext(r.Context(), `SELECT state,last_started_at,last_finished_at,next_run_at,last_error
+		FROM support_triage_runtime WHERE id=1`).Scan(&counts.WorkerState, &counts.LastStarted, &counts.LastFinished, &counts.NextRun, &counts.LastError); err != nil {
 		s.fail(w, err)
 		return
 	}

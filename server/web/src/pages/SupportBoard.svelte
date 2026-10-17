@@ -1,12 +1,22 @@
 <script lang="ts">
   import { tick } from 'svelte'
-  import { api, type SupportCard, type SupportCardDraft, type SupportChecklistItem, type SupportLabel, type SupportList, type SupportTriageStatus } from '../lib/api'
+  import { api, type SupportCard, type SupportCardAuditEntry, type SupportCardDraft, type SupportCardLink, type SupportCategory, type SupportChecklistItem, type SupportLabel, type SupportList, type SupportPriority, type SupportRelatedCandidate, type SupportReviewState, type SupportTriageStatus } from '../lib/api'
   import Button from '../lib/ui/Button.svelte'
   import Card from '../lib/ui/Card.svelte'
   import Notice from '../lib/ui/Notice.svelte'
   import { link } from '../lib/router.svelte'
+  import SupportActivity from './SupportActivity.svelte'
+  import SupportInsights from './SupportInsights.svelte'
+  import SupportRules from './SupportRules.svelte'
+  import SupportActions from './SupportActions.svelte'
 
   const labelPalette: SupportLabel['color'][] = ['purple', 'blue', 'green', 'yellow', 'orange', 'red', 'gray']
+  const categories: { value: SupportCategory; label: string }[] = [
+    { value: 'bug', label: 'Bug' }, { value: 'correction', label: 'Correction' },
+    { value: 'suggestion', label: 'Suggestion' }, { value: 'partnership', label: 'Partnership / affiliate' },
+    { value: 'customer_request', label: 'Customer request' }, { value: 'internal_bug', label: 'Internal issue' },
+    { value: 'other', label: 'Other' },
+  ]
   let lists = $state<SupportList[]>([])
   let cards = $state<SupportCard[]>([])
   let triageStatus = $state<SupportTriageStatus | null>(null)
@@ -16,15 +26,27 @@
   let busyCard = $state('')
   let search = $state('')
   let productFilter = $state('')
+  let categoryFilter = $state<SupportCategory | ''>('')
+  let priorityFilter = $state<SupportPriority | ''>('')
+  let reviewFilter = $state<SupportReviewState | ''>('')
+  let fromDate = $state('')
+  let toDate = $state('')
   let showArchived = $state(false)
+  let activityView = $state(false)
+  let rulesView = $state(false)
+  let insightsView = $state(false)
   let dragCardId = $state('')
   let dragListId = $state('')
   let boardDialog: HTMLDialogElement
   let detailCard = $state<SupportCard | null>(null)
+  let cardHistory = $state<SupportCardAuditEntry[]>([])
+  let cardLinks = $state<SupportCardLink[]>([])
+  let relatedCandidates = $state<SupportRelatedCandidate[]>([])
+  let relationBusy = $state('')
   let detailLoading = $state(false)
   let creating = $state(false)
   let saving = $state(false)
-  let draft = $state<SupportCardDraft>({ title: '', product: 'Boop', description: '', priority: 'normal', due_at: '', list_id: '', labels: [] })
+  let draft = $state<SupportCardDraft>({ title: '', product: 'Boop', description: '', priority: 'normal', category: 'other', due_at: '', list_id: '', labels: [] })
   let dueLocal = $state('')
   let labelInput = $state('')
   let labelColor = $state<SupportLabel['color']>('blue')
@@ -39,6 +61,11 @@
     return cards.filter((card) => {
       if (Boolean(card.archived_at) !== showArchived) return false
       if (productFilter && card.product !== productFilter) return false
+      if (categoryFilter && card.category !== categoryFilter) return false
+      if (priorityFilter && card.priority !== priorityFilter) return false
+      if (reviewFilter && card.review_state !== reviewFilter) return false
+      if (fromDate && card.reported_at.slice(0, 10) < fromDate) return false
+      if (toDate && card.reported_at.slice(0, 10) > toDate) return false
       if (!query) return true
       return [card.title, card.product, card.sender, card.description, card.original_text, ...card.labels.map((label) => label.name)]
         .some((value) => value.toLocaleLowerCase().includes(query))
@@ -51,7 +78,10 @@
     if (showLoader) loading = true
     try {
       error = ''
-      const [board, status] = await Promise.all([api.supportBoard(showArchived), api.supportTriageStatus()])
+      const [board, status] = await Promise.all([api.supportBoard({
+        archived: showArchived, q: search.trim(), product: productFilter, category: categoryFilter || undefined,
+        priority: priorityFilter || undefined, review_state: reviewFilter || undefined, from: fromDate, to: toDate,
+      }), api.supportTriageStatus()])
       lists = board.lists
       cards = board.cards
       triageStatus = status
@@ -68,6 +98,7 @@
       product: card.product,
       description: card.description,
       priority: card.priority,
+      category: card.category,
       due_at: card.due_at,
       list_id: card.list_id,
       labels: [...card.labels],
@@ -87,6 +118,9 @@
 
   async function openCard(card: SupportCard) {
     detailCard = card
+    cardHistory = []
+    cardLinks = []
+    relatedCandidates = []
     creating = false
     detailLoading = true
     draft = inputFromCard(card)
@@ -102,6 +136,12 @@
       draft = inputFromCard(fullCard)
       dueLocal = localDateTime(fullCard.due_at)
       cards = cards.map((item) => item.id === fullCard.id ? fullCard : item)
+      const [historyResult, relationResult] = await Promise.all([
+        api.supportCardHistory(card.id), api.supportCardRelated(card.id),
+      ])
+      cardHistory = historyResult.history
+      cardLinks = relationResult.links
+      relatedCandidates = relationResult.suggestions
     } catch (e: any) {
       error = e.message
     } finally {
@@ -109,12 +149,25 @@
     }
   }
 
+  function refreshCardFromAction() {
+    if (!detailCard) return
+    const cardId = detailCard.id
+    void api.supportCard(cardId).then((updated) => {
+      if (detailCard?.id !== cardId) return
+      detailCard = updated
+      cards = cards.map((item) => item.id === cardId ? updated : item)
+    }).catch((e: any) => {
+      error = e.message
+    })
+  }
+
   async function openNewCard(listId: string) {
     detailCard = null
+    cardHistory = []
     creating = true
     detailLoading = false
     saving = false
-    draft = { title: '', product: 'Boop', description: '', priority: 'normal', due_at: '', list_id: listId, labels: [] }
+    draft = { title: '', product: 'Boop', description: '', priority: 'normal', category: 'other', due_at: '', list_id: listId, labels: [] }
     dueLocal = ''
     labelInput = ''
     commentDraft = ''
@@ -157,6 +210,60 @@
       error = e.message
     } finally {
       saving = false
+    }
+  }
+
+  async function markReviewed(card: SupportCard) {
+    try {
+      const reviewed = await api.reviewSupportCard(card.id)
+      cards = cards.map((item) => item.id === reviewed.id ? reviewed : item)
+      detailCard = reviewed
+      cardHistory = (await api.supportCardHistory(card.id)).history
+      notice = 'Card marked as reviewed.'
+    } catch (e: any) {
+      error = e.message || 'Could not mark this card as reviewed.'
+    }
+  }
+
+  async function openRelatedCard(cardId: string) {
+    try {
+      const card = cards.find((item) => item.id === cardId) ?? await api.supportCard(cardId)
+      await openCard(card)
+    } catch (e: any) {
+      error = e.message || 'Could not open the related card.'
+    }
+  }
+
+  async function createCardLink(candidate: SupportRelatedCandidate, relation: SupportCardLink['relation']) {
+    if (!detailCard || relationBusy) return
+    relationBusy = candidate.card_id
+    error = ''
+    try {
+      const result = await api.createSupportCardLink(detailCard.id, candidate.card_id, relation)
+      cardLinks = result.links
+      relatedCandidates = result.suggestions
+      notice = relation === 'duplicate' ? 'Card marked as a possible duplicate.' : 'Cards linked.'
+    } catch (e: any) {
+      error = e.message || 'Could not link these cards.'
+    } finally {
+      relationBusy = ''
+    }
+  }
+
+  async function removeCardLink(link: SupportCardLink) {
+    if (!detailCard || relationBusy) return
+    relationBusy = link.id
+    error = ''
+    try {
+      await api.deleteSupportCardLink(detailCard.id, link.id)
+      const result = await api.supportCardRelated(detailCard.id)
+      cardLinks = result.links
+      relatedCandidates = result.suggestions
+      notice = 'Card relationship removed.'
+    } catch (e: any) {
+      error = e.message || 'Could not remove this relationship.'
+    } finally {
+      relationBusy = ''
     }
   }
 
@@ -403,6 +510,9 @@
 
   function closeDialog() {
     detailCard = null
+    cardHistory = []
+    cardLinks = []
+    relatedCandidates = []
     creating = false
     detailLoading = false
     labelInput = ''
@@ -430,7 +540,13 @@
   }
 
   $effect(() => {
-    load(true)
+    const filterSnapshot = [search, productFilter, categoryFilter, priorityFilter, reviewFilter, fromDate, toDate, showArchived].join('|')
+    void filterSnapshot
+    const timer = setTimeout(() => load(), 250)
+    return () => clearTimeout(timer)
+  })
+
+  $effect(() => {
     const timer = setInterval(() => load(), 30_000)
     return () => clearInterval(timer)
   })
@@ -439,14 +555,28 @@
 <div class="stack support-page">
   <div class="toolbar">
     <div class="heading">
-      <h1>{showArchived ? 'Archived cards' : 'Support board'}</h1>
+      <h1>{rulesView ? 'Classification rules' : activityView ? 'AI triage activity' : insightsView ? 'Support insights' : showArchived ? 'Archived cards' : 'Support board'}</h1>
       <p class="muted">Customer reports, bugs, suggestions, and partner leads from every Boop project.</p>
     </div>
     <div class="toolbar-actions">
-      <Button variant="secondary" size="sm" onclick={() => (showArchived = !showArchived)}>
-        {showArchived ? 'Back to board' : 'Archive'}
+      <Button variant={!activityView && !rulesView && !insightsView ? 'primary' : 'secondary'} size="sm" onclick={() => { activityView = false; rulesView = false; insightsView = false }}>
+        Board
       </Button>
-      {#if !showArchived}<Button size="sm" onclick={() => openNewCard(lists[0]?.id ?? '')}>＋ New card</Button>{/if}
+      <Button variant={activityView ? 'primary' : 'secondary'} size="sm" onclick={() => { activityView = true; rulesView = false; insightsView = false }}>
+        AI activity
+      </Button>
+      <Button variant={rulesView ? 'primary' : 'secondary'} size="sm" onclick={() => { rulesView = true; activityView = false; insightsView = false }}>
+        Rules
+      </Button>
+      <Button variant={insightsView ? 'primary' : 'secondary'} size="sm" onclick={() => { insightsView = true; activityView = false; rulesView = false }}>
+        Insights
+      </Button>
+      {#if !activityView && !rulesView && !insightsView}
+        <Button variant="secondary" size="sm" onclick={() => (showArchived = !showArchived)}>
+          {showArchived ? 'Back to board' : 'Archive'}
+        </Button>
+        {#if !showArchived}<Button size="sm" onclick={() => openNewCard(lists[0]?.id ?? '')}>＋ New card</Button>{/if}
+      {/if}
       <Button variant="secondary" size="sm" onclick={() => load(true)} disabled={loading}>Refresh</Button>
     </div>
   </div>
@@ -458,9 +588,12 @@
       <span class="dot">·</span>
       <span>{triageStatus.pending + triageStatus.processing} pending</span>
       <span class="dot">·</span>
+      <span>{triageStatus.failed} failed</span>
+      <span class="dot">·</span>
       <span>{triageStatus.matched} cards created</span>
       <span class="dot">·</span>
       <span>{triageStatus.ignored} routine notices filtered</span>
+      {#if triageStatus.last_finished_at}<span class="dot">·</span><span>Last run {formatDate(triageStatus.last_finished_at)}</span>{/if}
     </div>
     {#if triageStatus.configuration_error}
       <Notice tone="bad">The saved OpenRouter key could not be read. Replace it or remove it in <a href="/settings" onclick={link}>Settings</a> to resume queued triage.</Notice>
@@ -471,6 +604,13 @@
   {#if notice}<p class="success-note" role="status">{notice}</p>{/if}
   {#if error}<Notice tone="bad"><span role="alert">{error.includes('support_auth_required') ? 'The private support board is disabled. Configure BOOP_ADMIN_USER and BOOP_ADMIN_PASSWORD, then sign in.' : error}</span></Notice>{/if}
 
+  {#if activityView}
+    <SupportActivity onChanged={() => load()} />
+  {:else if rulesView}
+    <SupportRules onChanged={() => load()} />
+  {:else if insightsView}
+    <SupportInsights />
+  {:else}
   <div class="board-tools">
     <label class="search">
       <span aria-hidden="true">⌕</span>
@@ -481,6 +621,21 @@
         <option value="">All projects</option>
         {#each products as product (product)}<option value={product}>{product}</option>{/each}
       </select>
+      <select bind:value={categoryFilter} aria-label="Filter by category">
+        <option value="">All categories</option>
+        {#each categories as category (category.value)}<option value={category.value}>{category.label}</option>{/each}
+      </select>
+      <select bind:value={priorityFilter} aria-label="Filter by priority">
+        <option value="">All priorities</option>
+        <option value="low">Low</option><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option>
+      </select>
+      <select bind:value={reviewFilter} aria-label="Filter by review state">
+        <option value="">All review states</option>
+        <option value="needs_review">Needs review</option>
+        <option value="reviewed">Reviewed</option>
+      </select>
+      <label class="date-filter"><span>From</span><input bind:value={fromDate} type="date" aria-label="Filter reported from date" /></label>
+      <label class="date-filter"><span>To</span><input bind:value={toDate} type="date" aria-label="Filter reported to date" /></label>
     {/if}
     <span class="result-count">{visibleCards.length} {visibleCards.length === 1 ? 'card' : 'cards'}</span>
   </div>
@@ -530,7 +685,7 @@
                 type="button"
                 class="ticket"
                 class:dragging={dragCardId === card.id}
-                draggable={!showArchived && !search.trim() && !productFilter}
+                draggable={!showArchived && !search.trim() && !productFilter && !categoryFilter && !priorityFilter && !reviewFilter && !fromDate && !toDate}
                 ondragstart={(event) => startCardDrag(event, card)}
                 ondragend={() => { dragCardId = ''; dragListId = '' }}
                 ondragover={allowDrop}
@@ -540,6 +695,7 @@
               >
                 <div class="ticket-top">
                   {#if card.priority !== 'normal'}<span class={`priority ${card.priority}`}>{card.priority}</span>{/if}
+                  <span class="category-tag">{card.category.replace('_', ' ')}</span>
                   <span class="product">{card.product}</span>
                   <time datetime={card.reported_at}>{formatDate(card.reported_at)}</time>
                 </div>
@@ -548,6 +704,7 @@
                 {#if summary(card)}<span class="ticket-summary">{summary(card)}</span>{/if}
                 <div class="ticket-bottom">
                   <span class="ticket-source">{card.manual ? 'Manual card' : card.sender || card.source_account}</span>
+                  {#if card.review_state === 'needs_review'}<span class="review-tag">Needs review</span>{/if}
                   <span class="ticket-metrics">
                     {#if card.due_at}<span class:overdue={dueState(card) === 'overdue'} title="Due date">◷ {formatDate(card.due_at)}</span>{/if}
                     {#if card.checklist_total}<span title="Checklist progress">☑ {card.checklist_done}/{card.checklist_total}</span>{/if}
@@ -568,6 +725,7 @@
         <Button variant="secondary" size="sm" disabled={!newListName.trim()}>＋ Add list</Button>
       </form>
     </div>
+  {/if}
   {/if}
 </div>
 
@@ -607,6 +765,53 @@
               <form class="comment-form" onsubmit={addComment}><textarea bind:value={commentDraft} rows="3" maxlength="10000" placeholder="Write a comment…" aria-label="Write a comment"></textarea><Button size="sm" disabled={!commentDraft.trim()}>Add comment</Button></form>
             </section>
 
+            <section class="detail-section">
+              <div class="section-title"><h3>Change history</h3><span>{cardHistory.length}</span></div>
+              {#if cardHistory.length}
+                <ul class="card-history">
+                  {#each cardHistory as entry (entry.id)}
+                    <li><strong>{entry.actor} · {entry.action}</strong>{#if entry.field}<span>{entry.field}: {entry.old_value || '—'} → {entry.new_value || '—'}</span>{/if}<time datetime={entry.created_at}>{new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(entry.created_at))}</time></li>
+                  {/each}
+                </ul>
+              {:else}
+                <p class="muted caption">No changes recorded yet.</p>
+              {/if}
+            </section>
+
+            <section class="detail-section">
+              <div class="section-title"><h3>Related cards</h3><span>{cardLinks.length}</span></div>
+              {#if cardLinks.length}
+                <ul class="related-list">
+                  {#each cardLinks as item (item.id)}
+                    <li>
+                      <button type="button" class="related-title" onclick={() => openRelatedCard(item.related_card_id)}>{item.direction === 'duplicate_of' ? 'Duplicate of' : item.direction === 'duplicated_by' ? 'Duplicated by' : 'Related'} · {item.title}</button>
+                      <span>{item.product}</span>
+                      <button type="button" class="inline-remove" aria-label={`Remove relation to ${item.title}`} onclick={() => removeCardLink(item)} disabled={relationBusy === item.id}>×</button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+              {#if relatedCandidates.length}
+                <p class="muted caption">Suggestions use exact issue references or URLs first, then similar titles. Review before linking; nothing is merged automatically.</p>
+                <ul class="related-list">
+                  {#each relatedCandidates as candidate (candidate.card_id)}
+                    <li class="candidate-row">
+                      <button type="button" class="related-title" onclick={() => openRelatedCard(candidate.card_id)}>{candidate.title}</button>
+                      <span>{candidate.product} · {candidate.match_reason === 'exact_reference' ? `${candidate.match_count} shared references` : `${candidate.match_count} shared title terms`}</span>
+                      <div class="related-actions">
+                        <Button variant="secondary" size="sm" onclick={() => createCardLink(candidate, 'related')} disabled={!!relationBusy}>Link</Button>
+                        <Button variant="secondary" size="sm" onclick={() => createCardLink(candidate, 'duplicate')} disabled={!!relationBusy}>Duplicate</Button>
+                      </div>
+                    </li>
+                  {/each}
+                </ul>
+              {:else if !cardLinks.length}
+                <p class="muted caption">No exact-reference matches found. No cards are linked automatically.</p>
+              {/if}
+            </section>
+
+            <SupportActions card={detailCard} onChanged={refreshCardFromAction} />
+
             {#if !detailCard.manual}
               <details class="source-details">
                 <summary>Original notification</summary>
@@ -622,6 +827,14 @@
           <label class="field"><span>List</span><select bind:value={draft.list_id}>{#each lists as list (list.id)}<option value={list.id}>{list.name}</option>{/each}</select></label>
           <label class="field"><span>Project / product</span><input bind:value={draft.product} maxlength="200" placeholder="Boop" /></label>
           <label class="field"><span>Priority</span><select bind:value={draft.priority}><option value="normal">Normal</option><option value="low">Low</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
+          <label class="field"><span>Category</span><select bind:value={draft.category}>{#each categories as category (category.value)}<option value={category.value}>{category.label}</option>{/each}</select></label>
+          {#if !creating && detailCard && !detailCard.manual}
+            <section class="ai-classification">
+              <div class="section-title"><h3>AI classification</h3><span class:needs-review={detailCard.review_state === 'needs_review'}>{detailCard.review_state === 'needs_review' ? 'Needs review' : 'Reviewed'}</span></div>
+              <p>Suggested: {detailCard.ai_category || '—'} · {detailCard.ai_priority || '—'} · {Math.round(detailCard.ai_confidence * 100)}% confidence</p>
+              {#if detailCard.ai_reason}<small>{detailCard.ai_reason}</small>{/if}
+            </section>
+          {/if}
           <label class="field"><span>Due date</span><input type="datetime-local" bind:value={dueLocal} /></label>
 
           <section class="detail-section label-section">
@@ -658,6 +871,7 @@
       {#if error}<p class="dialog-error" role="alert">{error}</p>{/if}
       <footer class="dialog-footer">
         {#if !creating}<Button variant="danger" size="sm" type="button" onclick={toggleArchive}>{detailCard?.archived_at ? 'Restore card' : 'Archive card'}</Button>{/if}
+        {#if !creating && detailCard?.review_state === 'needs_review'}<Button variant="secondary" size="sm" type="button" onclick={() => markReviewed(detailCard!)}>Mark reviewed</Button>{/if}
         <span class="spacer"></span>
         <Button variant="secondary" size="sm" type="button" onclick={() => boardDialog.close()}>Close</Button>
         <Button size="sm" type="button" onclick={() => saveCard()} disabled={saving || detailLoading}>{saving ? 'Saving…' : 'Save card'}</Button>
@@ -682,6 +896,8 @@
   .search { display: flex; align-items: center; gap: 7px; width: min(320px, 100%); height: 34px; padding: 0 10px; border: 1px solid var(--up-border-control); border-radius: var(--up-radius-control); color: var(--up-text-muted); background: var(--up-bg); }
   .search input { width: 100%; border: 0; outline: 0; color: var(--up-ink); font: var(--up-type-meta); background: transparent; }
   .board-tools select, .field input, .field select, .label-form input, .label-form select, .inline-form input { min-height: 34px; border: 1px solid var(--up-border-control); border-radius: var(--up-radius-control); padding: 6px 9px; color: var(--up-ink); background: var(--up-bg); font: var(--up-type-meta); }
+  .date-filter { display: inline-flex; align-items: center; gap: 5px; color: var(--up-text-muted); font: var(--up-type-caption); }
+  .date-filter input { min-height: 34px; border: 1px solid var(--up-border-control); border-radius: var(--up-radius-control); padding: 5px 7px; color: var(--up-ink); background: var(--up-bg); font: var(--up-type-caption); }
   .result-count { margin-left: auto; color: var(--up-text-muted); font: var(--up-type-caption); }
   .board { display: flex; align-items: flex-start; gap: 12px; overflow-x: auto; padding: 2px 2px 10px; min-height: min(68vh, 760px); }
   .lane { display: flex; flex: 0 0 286px; flex-direction: column; max-height: calc(100vh - 345px); min-height: 260px; padding: 8px; border: 1px solid #eceef4; border-radius: 10px; background: #f4f5f9; }
@@ -711,6 +927,12 @@
   .priority.low { color: #53775e; background: #e7f2e8; }
   .priority.high { color: #9a6221; background: #fff0d7; }
   .priority.urgent { color: #a13742; background: #fde5e6; }
+  .category-tag, .review-tag { display: inline-flex; width: fit-content; align-items: center; border-radius: 4px; padding: 2px 5px; background: #eef0f7; color: var(--up-text-secondary); font: var(--up-type-caption); text-transform: capitalize; }
+  .review-tag { background: #fff0d7; color: #8b5d16; }
+  .ai-classification { display: flex; flex-direction: column; gap: 7px; padding: 10px; border: 1px solid var(--up-border-hairline); border-radius: 7px; background: white; }
+  .ai-classification p, .ai-classification small { color: var(--up-text-secondary); font: var(--up-type-caption); }
+  .ai-classification small { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ai-classification .needs-review { color: #8b5d16; }
   .ticket-title { display: -webkit-box; overflow: hidden; color: var(--up-ink); font: var(--up-type-ui); line-clamp: 3; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
   .ticket-summary { display: -webkit-box; overflow: hidden; color: var(--up-text-secondary); font: var(--up-type-caption); white-space: pre-wrap; overflow-wrap: anywhere; line-clamp: 3; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
   .labels { display: flex; flex-wrap: wrap; gap: 5px; }
@@ -767,6 +989,16 @@
   .comment-meta strong { color: var(--up-text-secondary); }
   .comment-meta time { margin-left: auto; }
   .comments li p { margin-top: 6px; color: var(--up-ink); font: var(--up-type-meta); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .card-history { display: flex; max-height: 190px; flex-direction: column; gap: 8px; overflow: auto; margin: 0; padding: 0; list-style: none; }
+  .card-history li { display: flex; flex-direction: column; gap: 3px; padding: 7px 8px; border-left: 2px solid var(--up-accent); background: white; }
+  .card-history strong, .card-history span, .card-history time { color: var(--up-text-secondary); font: var(--up-type-caption); }
+  .related-list { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 0; list-style: none; }
+  .related-list li { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px; border: 1px solid var(--up-border-hairline); border-radius: 6px; background: white; }
+  .related-title { flex: 1; min-width: 0; border: 0; padding: 0; overflow: hidden; background: transparent; color: var(--up-ink); font: var(--up-type-meta); text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  .related-list li > span { color: var(--up-text-muted); font: var(--up-type-caption); white-space: nowrap; }
+  .related-list .candidate-row { align-items: flex-start; flex-direction: column; }
+  .related-list .candidate-row .related-title { width: 100%; }
+  .related-actions { display: flex; gap: 6px; }
   .comment-form { display: flex; align-items: flex-end; flex-direction: column; gap: 7px; }
   .label-section .labels:empty { display: none; }
   .label-form select { width: 85px; text-transform: capitalize; }

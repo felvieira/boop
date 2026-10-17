@@ -105,6 +105,20 @@ func (a *Admin) Authorized(r *http.Request) bool {
 	return false
 }
 
+// Actor returns the authenticated admin name for audit records.
+func (a *Admin) Actor(r *http.Request) string {
+	if a == nil || !a.Authorized(r) {
+		return ""
+	}
+	if username, password, ok := r.BasicAuth(); ok && a.Check(username, password) {
+		return username
+	}
+	if a.username != "" {
+		return a.username
+	}
+	return "Admin"
+}
+
 // SetCookie writes the session cookie for token onto w.
 func (a *Admin) SetCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{

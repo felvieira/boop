@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -53,7 +54,7 @@ type Delivery struct {
 type Dispatcher struct {
 	db        *sql.DB
 	devices   *devices.Store
-	sender    Sender // nil when APNs is not configured
+	sender    Sender        // nil when APNs is not configured
 	webSender WebPushSender // nil when Web Push is not configured
 	log       *slog.Logger
 	timeout   time.Duration
@@ -187,6 +188,67 @@ func (d *Dispatcher) Deliver(ctx context.Context, e events.Event, p projects.Pro
 		out = append(out, rec)
 	}
 	return out
+}
+
+// BroadcastOnce sends a digest at most once per device and local calendar day.
+// Successful device sends are persisted so a partial failure can retry without
+// duplicating notifications on devices that already received the digest.
+func (d *Dispatcher) BroadcastOnce(ctx context.Context, localDate, title, body string) (int, error) {
+	devs, err := d.devices.Pushable(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n := apns.Notification{Title: title, Body: body}
+	sent := 0
+	var sendErrors []error
+	for _, dev := range devs {
+		var alreadySent int
+		if err := d.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM support_digest_deliveries WHERE local_date=? AND device_id=?)`, localDate, dev.ID).Scan(&alreadySent); err != nil {
+			sendErrors = append(sendErrors, fmt.Errorf("check digest delivery for device %s: %w", dev.ID, err))
+			continue
+		}
+		if alreadySent != 0 || dev.DeviceToken == nil || strings.TrimSpace(*dev.DeviceToken) == "" {
+			continue
+		}
+		isWeb := dev.Platform == "web" || dev.Platform == "pwa" || strings.HasPrefix(*dev.DeviceToken, "{")
+		var pushID string
+		var sendErr error
+		if isWeb {
+			if d.webSender == nil {
+				continue
+			}
+			sctx, cancel := context.WithTimeout(ctx, d.timeout)
+			pushID, sendErr = d.webSender.Send(sctx, *dev.DeviceToken, n)
+			cancel()
+		} else {
+			if d.sender == nil {
+				continue
+			}
+			sctx, cancel := context.WithTimeout(ctx, d.timeout)
+			pushID, sendErr = d.sender.Send(sctx, *dev.DeviceToken, n)
+			cancel()
+		}
+		if sendErr != nil {
+			if isWeb && errors.Is(sendErr, webpush.ErrUnregistered) {
+				_ = d.devices.ClearToken(ctx, dev.ID)
+			} else if !isWeb {
+				var ae *apns.Error
+				if errors.As(sendErr, &ae) && ae.Unregistered() {
+					_ = d.devices.ClearToken(ctx, dev.ID)
+				}
+			}
+			d.log.Warn("support.digest.push_failed", "device_id", dev.ID, "platform", dev.Platform, "error", sendErr.Error())
+			sendErrors = append(sendErrors, fmt.Errorf("send digest to device %s: %w", dev.ID, sendErr))
+			continue
+		}
+		if _, err := d.db.ExecContext(ctx, `INSERT OR IGNORE INTO support_digest_deliveries (local_date,device_id,sent_at) VALUES (?,?,?)`, localDate, dev.ID, ids.Now()); err != nil {
+			sendErrors = append(sendErrors, fmt.Errorf("record digest delivery for device %s: %w", dev.ID, err))
+			continue
+		}
+		sent++
+		d.log.Info("support.digest.push_sent", "device_id", dev.ID, "platform", dev.Platform, "push_id", pushID)
+	}
+	return sent, errors.Join(sendErrors...)
 }
 
 // ForEvent lists deliveries recorded for an event.
