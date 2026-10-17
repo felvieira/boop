@@ -17,9 +17,9 @@ Ordem recomendada:
 
 ## Estado da implementação
 
-As fases 1 a 4 foram implementadas no checkout local. A fase 5 também está implementada como preparação e execução revisada: cada cartão pode guardar rascunho de issue, resposta ou plano técnico; issues usam um destino GitHub mapeado pelo produto e só são criadas após confirmação explícita. O token GitHub ainda precisa ser configurado em Settings e a migração `0011_support_actions.sql` precisa ser aplicada quando a nova versão iniciar.
+As fases 1 a 5 estão implementadas e publicadas em `felvieira/boop:main`. O Coolify concluiu o deploy pelo webhook; o container está saudável, `/health` respondeu HTTP 200 e o site serve o bundle novo. A migração `0011_support_actions.sql` acompanha a versão e é executada no startup. O token GitHub ainda precisa ser configurado em Settings.
 
-Respostas são copiadas ou abertas no cliente de e-mail como rascunho; o Boop não as envia. Planos aprovados viram itens do checklist do cartão. A criação de issue é idempotente pelo marcador do cartão, registra aprovador, hash do conteúdo, resultado e identificador externo, e pede reconciliação quando a resposta do GitHub é incerta. O código local foi compilado, mas nenhuma ação real foi executada no GitHub nem houve deploy.
+Respostas são copiadas ou abertas no cliente de e-mail como rascunho; o Boop não as envia. Planos aprovados viram itens do checklist do cartão. A criação de issue é idempotente pelo marcador do cartão, registra aprovador, hash do conteúdo, resultado e identificador externo, e pede reconciliação quando a resposta do GitHub é incerta. Nenhuma issue ou resposta real foi criada ou enviada durante a implantação.
 
 ## O que o Boop já tem
 
