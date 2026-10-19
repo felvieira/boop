@@ -4,6 +4,28 @@ Boop's **Support** tab is a private Trello-style board for actionable customer c
 
 The triage worker discovers notifications at startup and once per hour after that. It processes queued notifications in batches only when they are pending or due for retry. The durable `notification_triage` row records every matched or ignored event, so completed notifications are not sent to the model again. On the first run, pending notifications already in the queue are processed too. Routine billing, deployment, cron, and status notices remain in Inbox and are marked as filtered. AI cards retain the source project, sender/email when present, timestamp, and original notification for review.
 
+## Confirmed subscription orders and trial starts
+
+Subscription orders become Support cards only when the event itself explicitly records order confirmation, completed payment, a positive decimal amount, and a three-letter currency code. The deterministic gate runs after AI classification and overrides its include/exclude decision for eligible orders and explicit trial starts. It never takes payment state, value, or currency from the model. The card title and summary show the exact `amount` and `currency` values from the event. Generic `level: "success"`, generic `status: "success"`, a sentence such as “order confirmed,” or an `orderId` alone are not proof of payment; incomplete subscription orders are finalized as filtered and do not create cards.
+
+For new subscription order notifications, send structured data such as:
+
+```json
+{
+  "event_type": "subscription_order_confirmed",
+  "confirmation_status": "confirmed",
+  "payment_status": "paid",
+  "amount": "149.90",
+  "currency": "BRL"
+}
+```
+
+`amount` must be a positive decimal in major currency units, without thousands separators; `currency` must be a three-letter code, not a symbol. The worker checks the code's three-letter format, not membership in a currency registry. It also recognizes explicit positive `confirmed`/`confirmation_status`/`order_status` fields, payment completion flags or `payment.status`, and amount aliases `amount_total`, `total_amount`, `order_amount`, `order_total`, `paid_amount`, and `subscription_amount`. A pending or contradictory current status is filtered. Historical `previous_order` and subscription state are ignored; `confirmed_at` by itself is not proof. Keep one current order per notification and put its confirmation, payment, amount, and currency at the event level or under its `order`/`payment` objects. Arrays of order data are treated as ambiguous and never combined to create a card. A subscription/order context is needed for this gate; ordinary reports about a subscription continue through the existing contact and bug triage unless the event is a commercial order.
+
+Trial-start events are separate cards titled `Trial iniciado · <projeto>`. Send a structured marker such as `{ "event_type": "trial_started" }` or `{ "trial_started": true }`; clear event types, titles, or notification bodies that explicitly say the trial started are also recognized. Failure, error, scheduled, pending, requested, canceled, or otherwise negative markers are filtered, as are historical `trial_started_at` timestamps. A trial is never counted or described as a paid sale. The original event remains attached to the card for review.
+
+The worker does not revisit triage rows already finalized as matched or ignored. If a retry finds a Support card for the same source event, it leaves that card unchanged. Boop only checks the facts declared by the ingested event; it does not verify payment with a payment provider. Each source system must emit these fields for its own confirmed orders and trial starts.
+
 Migration `0005_notification_triage.sql` queues every event already stored in Boop. A background worker discovers new events and processes both old and new notifications from the same durable queue. Failed OpenRouter calls are retried with backoff; card upserts use the event identity, so a retry cannot create a duplicate. The Support tab shows queue progress.
 
 Configure the global OpenRouter key and model in Boop **Settings → AI support triage**. Boop validates a new key with OpenRouter's key endpoint without running a model completion, encrypts it on the server, and never returns it to the browser. The model picker shows JSON-capable text models and their published input/output prices per million tokens. Saved UI settings take precedence over the optional `OPENROUTER_API_KEY` and `BOOP_TRIAGE_MODEL` environment fallbacks; the default model is `google/gemini-3.8-flash`.
