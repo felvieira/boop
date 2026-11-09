@@ -16,9 +16,10 @@
       <span class="what">notifications · {periodLabel.toLowerCase()}</span>
       {#if total}<span class="delta {total.tone}" title="Change against the previous period">{total.text}</span>{/if}
     </button>
-    {#if net}<span class="net" title="Sales + renewals − refunds, from the amount and currency each event declares">Net revenue <strong>{net}</strong></span>{/if}
+    {#if net}<span class="net" title="Sales + renewals − refunds from notifications with declared amounts; not a complete accounting total">Declared net <strong>{net}</strong></span>{/if}
     {#if active}<button type="button" class="clear caption" onclick={() => onselect('')}>Clear filter</button>{/if}
   </div>
+  {#if net}<p class="coverage">Partial: excludes notifications without a declared amount and currency, including older events.</p>{/if}
   {#each KIND_ROWS as row (row.label)}
     <div class="row-label caption">{row.label}</div>
     <div class="grid">
@@ -47,6 +48,7 @@
 
 <style>
   .net { font: var(--up-type-meta); color: var(--up-text-secondary); margin-left: auto; }
+  .coverage { font: var(--up-type-caption); color: var(--up-text-secondary); }
   .net strong { color: var(--up-ink); font-weight: 700; }
   .money { font: var(--up-type-caption); color: var(--up-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
   .kinds { display: flex; flex-direction: column; gap: var(--up-space-2); }

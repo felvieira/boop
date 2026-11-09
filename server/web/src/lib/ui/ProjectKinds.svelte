@@ -17,7 +17,7 @@
       <tr>
         <th class="name">Project</th>
         <th>Total</th>
-        {#if showNet}<th title="Sales + renewals − refunds">Net revenue</th>{/if}
+        {#if showNet}<th title="Partial: sales + renewals − refunds from notifications with declared amounts">Declared net</th>{/if}
         {#each columns as k (k)}
           <th class:on={active === k} style="--kind: {KIND[k].color}" title={KIND[k].hint}><span class="dot" aria-hidden="true"></span>{KIND[k].label}</th>
         {/each}

@@ -9,6 +9,9 @@ All notable changes to Boop are recorded here. The format follows [Keep a Change
 - `GET /api/v1/events/stats` returns counts by kind and by project for the list filters, plus the previous equally long window when `since` is set. `GET /api/v1/events` accepts `kind`.
 - **Revenue in the big numbers.** Events that declare `data.amount` and a three-letter `data.currency` add up per kind and currency (`revenue_cents` in the stats response); the web and iOS inbox show the amount under each number and a **Net revenue** (sales + renewals − refunds), and the web per-project table gets a net revenue column.
 
+### Changed
+- Label notification-based revenue as partial on web and iOS; older events without amounts cannot be included.
+
 ## [1.3.0] — 2026-08-30
 
 ### Added

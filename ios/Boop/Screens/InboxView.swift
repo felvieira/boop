@@ -426,9 +426,12 @@ struct KindStatsView: View {
             }
             .buttonStyle(.plain)
             if let net = stats?.netRevenue {
-                (Text("Net revenue ").foregroundStyle(DS.Colors.textSecondary) + Text(net).foregroundStyle(DS.Colors.ink).bold())
+                (Text("Declared net ").foregroundStyle(DS.Colors.textSecondary) + Text(net).foregroundStyle(DS.Colors.ink).bold())
                     .font(DS.Text.meta)
                     .lineLimit(1)
+                Text("Partial: excludes notifications without a declared amount and currency, including older events.")
+                    .font(DS.Text.caption)
+                    .foregroundStyle(DS.Colors.textSecondary)
             }
             row("Revenue and growth", EventKind.growth)
             row("Churn and health", EventKind.churn)
