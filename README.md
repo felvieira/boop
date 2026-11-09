@@ -106,6 +106,10 @@ Labels are 40 characters or fewer; URLs must be absolute (`https://…` or an ap
 
 **Grouping.** Send the same `fingerprint` for the same problem and the inbox (web and phone) shows one row per fingerprint — `KeyError ×47 · First seen 09:31 · Last seen 10:42` — that opens the individual occurrences. Toggle it with "Group repeats". `GET /api/v1/events?grouped=true` is the API behind it. Grouping only affects display; every occurrence is stored and pushed (use a [silence](#silences) to stop pushes).
 
+**Business kinds and big numbers.** Boop sorts every event into a kind — `sale`, `renewal`, `trial`, `signup`, `lead`, `payment_failed`, `cancellation`, `refund`, `error` or `other` — from its type, title and source (plus the body and data for a `trialing` status). The inbox (web and phone) opens with big numbers per kind for the chosen period (last 24 hours, 7 days, 30 days or all time), each with the change against the previous equally long period, coloured by whether it is good news. Tapping a number filters the list to that kind; on the web a table breaks the counts down per project. Matching is by keyword, Portuguese and English: `Nova Assinatura`, `Pagamento PIX` and `New subscription` count as sales; `Renovação`/`renew` as renewals; `Falha no pagamento`/`payment failed`/`past_due` as failed payments; `Assinatura cancelada`/`subscription cancelled` as cancellations; `Reembolso`/`refund`/`chargeback` as refunds; `trial`/`período de teste` as trials; `parceria`/`afiliado`/`partner` as leads. Error and critical events never count as sales or cancellations. The kind is derived when read, so improving the rules reclassifies history; every event carries it as `kind`.
+
+**Revenue.** Put the money in `data` as `"amount": "149.90"` (major units, string or number) and `"currency": "BRL"` (three letters) and the big numbers also show how much each kind moved, plus **Net revenue** = sales + renewals − refunds, per currency. Boop only adds what the sender declares; it does not check with the payment provider.
+
 **Copy for an agent.** On the phone, the share button on an event offers *Copy*, *Copy as Markdown* and *Share*. The Markdown version lays the event out as sections — exception, environment, stack trace, context, breadcrumbs, data, links — ready to paste into Claude, ChatGPT or whatever you use. *Share* hands it straight to the assistant's app without the clipboard.
 
 From a shell script:
@@ -226,7 +230,8 @@ All endpoints are under `/api/v1` (except the Sentry envelope endpoint). Errors 
 | GET | `/health` | none | `{"status":"ok"}` |
 | POST | `/api/v1/events` | project key | Create event, returns `{id, created_at}` |
 | POST | `/api/:id/envelope/` | Sentry DSN key | [Sentry SDK](#sentry-sdks--drop-in-dsn) ingest; DSN public key is a project API key |
-| GET | `/api/v1/events?project=&level=&source=&fingerprint=&since=&until=&silenced=&grouped=&before=&limit=` | device or none | List, newest first; `next_cursor` feeds `before`; `silenced=true\|false` filters; `grouped=true` collapses repeated fingerprints into one row with `group: {count, first_seen, last_seen}` |
+| GET | `/api/v1/events?project=&level=&source=&kind=&fingerprint=&since=&until=&silenced=&grouped=&before=&limit=` | device or none | List, newest first; `next_cursor` feeds `before`; `silenced=true\|false` filters; `kind` filters by [business kind](#send-an-event); `grouped=true` collapses repeated fingerprints into one row with `group: {count, first_seen, last_seen}` |
+| GET | `/api/v1/events/stats?project=&level=&source=&since=&until=&silenced=` | device or none | Event counts: `{total, kinds: {sale: n, …}, revenue_cents: {BRL: {sale: 14990, …}}, previous: {total, kinds, revenue_cents}, projects: [{project_id, project_name, total, kinds, revenue_cents}]}`; `revenue_cents` sums `data.amount` ×100 by `data.currency` and kind; `previous` is the equally long window before `since` (absent without `since`) |
 | GET | `/api/v1/events/:id` | device or none | Full event |
 | GET | `/api/v1/events/:id/deliveries` | device or none | Push attempts for an event |
 | GET/POST | `/api/v1/projects` | admin | List / create (returns `api_key` once) |

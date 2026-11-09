@@ -23,6 +23,7 @@ import (
 	"github.com/chrisgreg/boop/server/internal/delivery"
 	"github.com/chrisgreg/boop/server/internal/devices"
 	"github.com/chrisgreg/boop/server/internal/events"
+	"github.com/chrisgreg/boop/server/internal/ids"
 	"github.com/chrisgreg/boop/server/internal/pairing"
 	"github.com/chrisgreg/boop/server/internal/projects"
 	"github.com/chrisgreg/boop/server/internal/settings"
@@ -442,6 +443,90 @@ func TestListEventsFilteringAndCursor(t *testing.T) {
 	}
 	if r := e.do("GET", "/api/v1/events", "boop_dev_junk", nil); r.status != 401 {
 		t.Errorf("junk bearer: %d", r.status)
+	}
+}
+
+func TestEventKindsAndStats(t *testing.T) {
+	e := newEnv(t)
+	_, memra := e.createProject("Memra")
+	_, cade := e.createProject("Cade")
+	cases := []struct {
+		key  string
+		ev   map[string]any
+		kind string
+	}{
+		{memra, map[string]any{"title": "Nova Assinatura · Memra", "level": "success", "source": "stripe"}, "sale"},
+		{memra, map[string]any{"title": "Pagamento PIX · Memra", "body": "R$ 99.90 pago via PIX", "level": "success", "source": "pix"}, "sale"},
+		{memra, map[string]any{"title": "Renovação de Assinatura · Memra", "level": "success", "source": "stripe", "data": map[string]any{"amount": "49.90", "currency": "brl"}}, "renewal"},
+		{memra, map[string]any{"title": "Falha no Pagamento · Memra", "level": "error", "source": "stripe"}, "payment_failed"},
+		// Numeric amounts count too; a symbol is not a currency code.
+		{memra, map[string]any{"title": "Reembolso Emitido · Memra", "level": "warning", "source": "stripe", "data": map[string]any{"amount": 10, "currency": "BRL"}}, "refund"},
+		{memra, map[string]any{"title": "Renovação de Assinatura · Memra", "level": "success", "source": "stripe", "data": map[string]any{"amount": "5.00", "currency": "R$"}}, "renewal"},
+		{cade, map[string]any{"title": "Assinatura Cancelada · Cade", "level": "warning", "source": "billing"}, "cancellation"},
+		// Store webhooks report trials only through the status.
+		{cade, map[string]any{"title": "Assinatura Google Play · Cade", "body": "Status: trialing (pro)", "level": "info", "source": "google_play", "data": map[string]any{"status": "trialing"}}, "trial"},
+		{cade, map[string]any{"title": "Assinatura Google Play · Cade", "body": "Status: active (pro)", "level": "success", "source": "google_play"}, "sale"},
+		{cade, map[string]any{"title": "[afiliado/parceria] Nova solicitação de parceria · Cade", "source": "affiliate_form"}, "lead"},
+		// An exception that mentions a subscription is an error, not a sale.
+		{cade, map[string]any{"title": "TypeError reading subscription", "level": "error", "source": "sentry"}, "error"},
+		{cade, map[string]any{"title": "Backup complete", "level": "success"}, "other"},
+	}
+	want := map[string]int{}
+	for _, c := range cases {
+		if r := e.do("POST", "/api/v1/events", c.key, c.ev); r.status != 201 {
+			t.Fatalf("create %v: %d %s", c.ev["title"], r.status, r.raw)
+		}
+		want[c.kind]++
+	}
+
+	r := e.do("GET", "/api/v1/events?limit=50", "", nil)
+	evs := r.body["events"].([]any)
+	for i, c := range cases {
+		got := evs[len(evs)-1-i].(map[string]any)
+		if got["kind"] != c.kind {
+			t.Errorf("%q: kind %v, want %s", c.ev["title"], got["kind"], c.kind)
+		}
+	}
+
+	r = e.do("GET", "/api/v1/events?kind=sale", "", nil)
+	if n := len(r.body["events"].([]any)); n != want["sale"] {
+		t.Errorf("kind filter: %d sales, want %d", n, want["sale"])
+	}
+	if r := e.do("GET", "/api/v1/events?kind=nope", "", nil); r.status != 422 {
+		t.Errorf("bad kind: %d", r.status)
+	}
+
+	// Two of Memra's sales move into the previous 24h window.
+	old := ids.Format(time.Now().Add(-36 * time.Hour))
+	if _, err := e.server.DB.Exec(`UPDATE events SET created_at = ? WHERE title IN ('Nova Assinatura · Memra', 'Pagamento PIX · Memra')`, old); err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+	r = e.do("GET", "/api/v1/events/stats?since="+since, "", nil)
+	if r.status != 200 {
+		t.Fatalf("stats: %d %s", r.status, r.raw)
+	}
+	kinds := r.body["kinds"].(map[string]any)
+	if kinds["sale"] != float64(1) || kinds["payment_failed"] != float64(1) || kinds["signup"] != float64(0) || r.body["total"] != float64(len(cases)-2) {
+		t.Errorf("current window: %s", r.raw)
+	}
+	prev := r.body["previous"].(map[string]any)
+	if prev["total"] != float64(2) || prev["kinds"].(map[string]any)["sale"] != float64(2) {
+		t.Errorf("previous window: %s", r.raw)
+	}
+	brl, _ := r.body["revenue_cents"].(map[string]any)["BRL"].(map[string]any)
+	if brl["renewal"] != float64(4990) || brl["refund"] != float64(1000) || len(r.body["revenue_cents"].(map[string]any)) != 1 {
+		t.Errorf("revenue: %s", r.raw)
+	}
+	projects := r.body["projects"].([]any)
+	if len(projects) != 2 || projects[0].(map[string]any)["project_name"] != "Cade" || projects[0].(map[string]any)["total"] != float64(6) {
+		t.Errorf("per project: %s", r.raw)
+	}
+
+	// Without since there is no comparison window.
+	r = e.do("GET", "/api/v1/events/stats?project=memra", "", nil)
+	if r.body["previous"] != nil || r.body["total"] != float64(6) {
+		t.Errorf("project stats: %s", r.raw)
 	}
 }
 

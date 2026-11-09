@@ -58,14 +58,27 @@ struct APIClient: Sendable {
         let _: Empty = try await request("DELETE", "/api/v1/devices/\(id)")
     }
 
-    func events(project: String? = nil, level: Level? = nil, fingerprint: String? = nil, grouped: Bool = false, before: String? = nil, limit: Int = 50) async throws -> EventPage {
+    func events(project: String? = nil, level: Level? = nil, kind: EventKind? = nil, since: Date? = nil, fingerprint: String? = nil, grouped: Bool = false, before: String? = nil, limit: Int = 50) async throws -> EventPage {
         var items = [URLQueryItem(name: "limit", value: String(limit))]
-        if let project, !project.isEmpty { items.append(.init(name: "project", value: project)) }
-        if let level { items.append(.init(name: "level", value: level.rawValue)) }
+        items += Self.filterItems(project: project, level: level, since: since)
+        if let kind { items.append(.init(name: "kind", value: kind.rawValue)) }
         if let fingerprint, !fingerprint.isEmpty { items.append(.init(name: "fingerprint", value: fingerprint)) }
         if grouped { items.append(.init(name: "grouped", value: "true")) }
         if let before { items.append(.init(name: "before", value: before)) }
         return try await request("GET", "/api/v1/events", query: items)
+    }
+
+    /// Event counts by kind for the same filters as `events`, ignoring the kind.
+    func eventStats(project: String? = nil, level: Level? = nil, since: Date? = nil) async throws -> EventStats {
+        try await request("GET", "/api/v1/events/stats", query: Self.filterItems(project: project, level: level, since: since))
+    }
+
+    private static func filterItems(project: String?, level: Level?, since: Date?) -> [URLQueryItem] {
+        var items: [URLQueryItem] = []
+        if let project, !project.isEmpty { items.append(.init(name: "project", value: project)) }
+        if let level { items.append(.init(name: "level", value: level.rawValue)) }
+        if let since { items.append(.init(name: "since", value: ISO8601.format(since))) }
+        return items
     }
 
     func event(id: String) async throws -> Event {
@@ -134,5 +147,10 @@ enum ISO8601 {
             }
         }
         return fractional.date(from: t) ?? plain.date(from: t)
+    }
+
+    /// UTC RFC 3339 with seconds, as the server's query filters accept.
+    static func format(_ date: Date) -> String {
+        plain.string(from: date)
     }
 }

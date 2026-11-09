@@ -111,6 +111,8 @@ type Event struct {
 	// SilenceID is set when a silence rule stopped this event from being pushed.
 	SilenceID string `json:"silence_id,omitempty"`
 	Silenced  bool   `json:"silenced"`
+	// Kind is the business kind derived from the event (see Kinds).
+	Kind string `json:"kind"`
 	// Group is set in grouped listings for events that carry a fingerprint: this
 	// event is the latest of Count occurrences sharing (project, fingerprint).
 	Group *GroupInfo `json:"group,omitempty"`
@@ -131,6 +133,7 @@ type Filter struct {
 	Fingerprint string
 	Before      string // cursor: id of the last event seen
 	Limit       int
+	Kind        string // one of Kinds; derived, see kindExpr
 	Silenced    *bool  // nil = any
 	Since       string // created_at >= (TimeLayout or RFC 3339)
 	Until       string // created_at < (TimeLayout or RFC 3339)
@@ -254,14 +257,14 @@ func (s *Store) Create(ctx context.Context, projectID string, in Input, r *redac
 	return s.Get(ctx, e.ID)
 }
 
-const selectCols = `e.id, COALESCE(e.external_id, ''), e.project_id, p.name, p.slug, p.icon, e.source, e.type, e.level, e.title, e.body, e.fingerprint, e.payload_json, e.actions_json, e.occurred_at, e.created_at, COALESCE(e.silence_id, '')`
+var selectCols = `e.id, COALESCE(e.external_id, ''), e.project_id, p.name, p.slug, p.icon, e.source, e.type, e.level, e.title, e.body, e.fingerprint, e.payload_json, e.actions_json, e.occurred_at, e.created_at, COALESCE(e.silence_id, ''), ` + kindExpr("e")
 
 const fromClause = ` FROM events e JOIN projects p ON p.id = e.project_id`
 
 func scan(row interface{ Scan(...any) error }, extra ...any) (Event, error) {
 	var e Event
 	var data, actions string
-	dest := []any{&e.ID, &e.ExternalID, &e.ProjectID, &e.ProjectName, &e.ProjectSlug, &e.ProjectIcon, &e.Source, &e.Type, &e.Level, &e.Title, &e.Body, &e.Fingerprint, &data, &actions, &e.OccurredAt, &e.CreatedAt, &e.SilenceID}
+	dest := []any{&e.ID, &e.ExternalID, &e.ProjectID, &e.ProjectName, &e.ProjectSlug, &e.ProjectIcon, &e.Source, &e.Type, &e.Level, &e.Title, &e.Body, &e.Fingerprint, &data, &actions, &e.OccurredAt, &e.CreatedAt, &e.SilenceID, &e.Kind}
 	dest = append(dest, extra...)
 	err := row.Scan(dest...)
 	e.Data = json.RawMessage(data)
@@ -302,6 +305,10 @@ func filterClause(f Filter, alias string) (where []string, args []any) {
 	if f.Source != "" {
 		where = append(where, a+"source = ?")
 		args = append(args, f.Source)
+	}
+	if f.Kind != "" {
+		where = append(where, kindExpr(alias)+" = ?")
+		args = append(args, f.Kind)
 	}
 	if f.Fingerprint != "" {
 		where = append(where, a+"fingerprint = ?")

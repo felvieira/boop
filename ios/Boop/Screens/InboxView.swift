@@ -10,6 +10,15 @@ final class InboxModel {
     var error: String?
     var level: Level?
     var project: String?
+    var kind: EventKind?
+    /// Counts by kind for the current period and filters (the kind filter excluded).
+    var stats: EventStats?
+    /// Rolling window shared by the big numbers and the list. Remembered across launches.
+    var period: StatsPeriod {
+        didSet { UserDefaults.standard.set(period.rawValue, forKey: "boop.inbox.period") }
+    }
+    /// Start of the window the current list pages were loaded with.
+    private var since: Date?
     /// Collapse repeats of the same fingerprint into one row. Remembered across launches.
     var grouped: Bool {
         didSet { UserDefaults.standard.set(grouped, forKey: "boop.inbox.grouped") }
@@ -18,6 +27,7 @@ final class InboxModel {
 
     init() {
         grouped = UserDefaults.standard.object(forKey: "boop.inbox.grouped") as? Bool ?? true
+        period = StatsPeriod(rawValue: UserDefaults.standard.string(forKey: "boop.inbox.period") ?? "") ?? .week
     }
 
     var projects: [Project] {
@@ -51,8 +61,13 @@ final class InboxModel {
         loading = true
         error = nil
         defer { loading = false; loadedOnce = true }
+        let since = period.since(.now)
+        self.since = since
+        // The big numbers are a summary: failing to load them must not hide the list.
+        let project = project, level = level
+        async let counts = try? client.eventStats(project: project, level: level, since: since)
         do {
-            let page = try await client.events(project: project, level: level, grouped: grouped)
+            let page = try await client.events(project: project, level: level, kind: kind, since: since, grouped: grouped)
             withAnimation(DS.Motion.settle) {
                 events = page.events
                 cursor = page.nextCursor
@@ -60,6 +75,7 @@ final class InboxModel {
         } catch {
             self.error = (error as? APIError)?.message ?? error.localizedDescription
         }
+        stats = await counts
     }
 
     func loadMore(_ client: APIClient) async {
@@ -67,7 +83,7 @@ final class InboxModel {
         loadingMore = true
         defer { loadingMore = false }
         do {
-            let page = try await client.events(project: project, level: level, grouped: grouped, before: cursor)
+            let page = try await client.events(project: project, level: level, kind: kind, since: since, grouped: grouped, before: cursor)
             let known = Set(events.map(\.id))
             withAnimation(DS.Motion.settle) {
                 events += page.events.filter { !known.contains($0.id) }
@@ -103,6 +119,8 @@ struct InboxView: View {
                 .task { if !model.loadedOnce { await reload() } }
                 .onChange(of: model.level) { Task { await reload() } }
                 .onChange(of: model.project) { Task { await reload() } }
+                .onChange(of: model.kind) { Task { await reload() } }
+                .onChange(of: model.period) { Task { await reload() } }
                 .onChange(of: model.grouped) { Task { await reload() } }
                 .navigationDestination(for: GroupRoute.self) { route in
                     GroupView(route: route, selected: $selected)
@@ -120,15 +138,27 @@ struct InboxView: View {
                 Button("Retry") { Task { await reload() } }.buttonStyle(.boopGhost)
             }
         } else if model.events.isEmpty {
-            EmptyState(
-                title: model.level == nil && model.project == nil ? "No events yet" : "Nothing matches",
-                message: model.level == nil && model.project == nil
-                    ? "Send one with curl or a client and it will show up here."
-                    : "Try clearing the filters.",
-                systemImage: "tray"
-            )
+            VStack(spacing: 0) {
+                if model.stats != nil {
+                    kindStats.padding(.horizontal, DS.Space.s4).padding(.top, DS.Space.s2)
+                }
+                EmptyState(
+                    title: model.level == nil && model.project == nil && model.kind == nil ? "No events yet" : "Nothing matches",
+                    message: model.level == nil && model.project == nil && model.kind == nil
+                        ? "Send one with curl or a client and it will show up here."
+                        : "Try another period or clear the filters.",
+                    systemImage: "tray"
+                )
+                Spacer(minLength: 0)
+            }
         } else {
             List {
+                if model.stats != nil {
+                    kindStats
+                        .listRowInsets(EdgeInsets(top: DS.Space.s2, leading: DS.Space.s4, bottom: DS.Space.s3, trailing: 0))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(DS.Colors.bg)
+                }
                 ForEach(model.groups) { group in
                     Section {
                         ForEach(group.events) { event in
@@ -171,6 +201,10 @@ struct InboxView: View {
         }
     }
 
+    private var kindStats: some View {
+        KindStatsView(stats: model.stats, period: model.period, active: $model.kind)
+    }
+
     private var skeleton: some View {
         VStack(spacing: 0) {
             ForEach(0..<6, id: \.self) { i in
@@ -194,7 +228,17 @@ struct InboxView: View {
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
+                Picker("Period", selection: $model.period) {
+                    ForEach(StatsPeriod.allCases) { p in Text(p.label).tag(p) }
+                }
                 Toggle("Group repeats", systemImage: "square.stack.3d.up", isOn: $model.grouped)
+                Picker("Kind", selection: $model.kind) {
+                    Text("All kinds").tag(EventKind?.none)
+                    ForEach(EventKind.allCases) { k in
+                        Label { Text(k.label) } icon: { Image(uiImage: IconShape.circle.image(k.color, size: 14)) }
+                            .tag(EventKind?.some(k))
+                    }
+                }
                 Picker("Level", selection: $model.level) {
                     Text("All levels").tag(Level?.none)
                     ForEach(Level.allCases) { l in
@@ -216,7 +260,7 @@ struct InboxView: View {
                     }
                 }
             } label: {
-                Image(systemName: model.level != nil || model.project != nil ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                Image(systemName: model.level != nil || model.project != nil || model.kind != nil ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
             }
             .tint(DS.Colors.accent)
         }
@@ -250,6 +294,9 @@ struct EventRow: View {
                         .lineLimit(1)
                     if let g = event.group, g.count > 1 {
                         CountPill(count: g.count)
+                    }
+                    if event.kind != .other && event.kind != .error {
+                        KindTag(kind: event.kind)
                     }
                 }
                 if let g = event.group, g.count > 1 {
@@ -295,6 +342,168 @@ struct CountPill: View {
             .padding(.vertical, 1)
             .background(DS.Colors.accentTint, in: Capsule())
             .monospacedDigit()
+    }
+}
+
+extension EventKind {
+    /// Same palette as the web UI (`server/web/src/lib/kinds.ts`).
+    var color: Color {
+        switch self {
+        case .sale: DS.Colors.altMint
+        case .renewal: DS.Colors.accent
+        case .trial: DS.Colors.altAmber
+        case .signup: DS.Colors.operationalStrong
+        case .lead: DS.Colors.altBlush
+        case .paymentFailed: DS.Colors.degradedStrong
+        case .cancellation: Color(hex: 0xD9667A)
+        case .refund: Color(hex: 0xB98455)
+        case .error: DS.Colors.outageStrong
+        case .other: DS.Colors.textFaint
+        }
+    }
+}
+
+/// Change against the previous equally long period, toned by whether it is good news.
+struct KindTrend: Equatable {
+    enum Tone { case good, bad, neutral }
+    let text: String
+    let tone: Tone
+
+    init?(goodWhenUp: Bool?, current: Int, previous: Int?) {
+        guard let previous else { return nil }
+        let diff = current - previous
+        if diff == 0 {
+            text = previous == 0 ? "—" : "= prev"
+            tone = .neutral
+            return
+        }
+        text = "\(diff > 0 ? "▲" : "▼") \(abs(diff))"
+        if let goodWhenUp {
+            tone = (diff > 0) == goodWhenUp ? .good : .bad
+        } else {
+            tone = .neutral
+        }
+    }
+
+    var color: Color {
+        switch tone {
+        case .good: DS.Colors.altMint
+        case .bad: Color(hex: 0xC9485E)
+        case .neutral: DS.Colors.textMuted
+        }
+    }
+}
+
+/// Big numbers: how many sales, renewals, cancellations… arrived in the period.
+/// Tapping a number filters the inbox to that kind; tapping it again clears it.
+struct KindStatsView: View {
+    let stats: EventStats?
+    let period: StatsPeriod
+    @Binding var active: EventKind?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.Space.s2) {
+            Button { active = nil } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(stats.map { "\($0.total)" } ?? "–")
+                        .font(DS.Text.metric)
+                        .foregroundStyle(active == nil ? DS.Colors.accentHover : DS.Colors.ink)
+                        .monospacedDigit()
+                    Text("notifications · \(period.label.lowercased())")
+                        .font(DS.Text.meta)
+                        .foregroundStyle(DS.Colors.textSecondary)
+                        .lineLimit(1)
+                    if let stats, let t = KindTrend(goodWhenUp: nil, current: stats.total, previous: stats.previous?.total) {
+                        Text(t.text).font(DS.Text.caption).foregroundStyle(t.color).monospacedDigit()
+                    }
+                    Spacer(minLength: 4)
+                    if active != nil {
+                        Text("Clear").font(DS.Text.small).foregroundStyle(DS.Colors.accent)
+                    }
+                }
+                .padding(.trailing, DS.Space.s4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if let net = stats?.netRevenue {
+                (Text("Net revenue ").foregroundStyle(DS.Colors.textSecondary) + Text(net).foregroundStyle(DS.Colors.ink).bold())
+                    .font(DS.Text.meta)
+                    .lineLimit(1)
+            }
+            row("Revenue and growth", EventKind.growth)
+            row("Churn and health", EventKind.churn)
+        }
+    }
+
+    private func row(_ label: String, _ kinds: [EventKind]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(DS.Text.caption).foregroundStyle(DS.Colors.textMuted)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: DS.Space.s2) {
+                    ForEach(kinds) { tile($0) }
+                }
+                .padding(.trailing, DS.Space.s4)
+            }
+        }
+    }
+
+    private func tile(_ kind: EventKind) -> some View {
+        let n = stats?.count(kind) ?? 0
+        let trend = stats.flatMap { KindTrend(goodWhenUp: kind.goodWhenUp, current: n, previous: $0.previous?.count(kind)) }
+        let on = active == kind
+        let shape = RoundedRectangle(cornerRadius: DS.Radius.row, style: .continuous)
+        return Button {
+            active = on ? nil : kind
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Circle().fill(kind.color).frame(width: 6, height: 6)
+                    Text(kind.label).font(DS.Text.caption).foregroundStyle(DS.Colors.textSecondary).lineLimit(1)
+                }
+                Text("\(n)")
+                    .font(.figtree(26, .bold))
+                    .foregroundStyle(n == 0 ? DS.Colors.textInactive : DS.Colors.ink)
+                    .monospacedDigit()
+                Text(trend?.text ?? " ")
+                    .font(DS.Text.caption)
+                    .foregroundStyle(trend?.color ?? DS.Colors.textMuted)
+                    .monospacedDigit()
+                if let money = stats?.money(kind) {
+                    Text(money)
+                        .font(DS.Text.caption)
+                        .foregroundStyle(DS.Colors.textSecondary)
+                        .lineLimit(1)
+                        .monospacedDigit()
+                }
+            }
+            .frame(width: 104, alignment: .leading)
+            .padding(.vertical, 8)
+            .padding(.leading, 12)
+            .padding(.trailing, 8)
+            .background(on ? kind.color.opacity(0.09) : DS.Colors.bg, in: shape)
+            .overlay(alignment: .leading) { Rectangle().fill(kind.color).frame(width: 3) }
+            .clipShape(shape)
+            .overlay(shape.strokeBorder(on ? kind.color : DS.Colors.borderHairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(kind.label): \(n)")
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+}
+
+/// "Sale", "Cancellation"… next to an event title.
+struct KindTag: View {
+    let kind: EventKind
+
+    var body: some View {
+        Text(kind.tag)
+            .font(DS.Text.caption)
+            .foregroundStyle(kind.color)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 1)
+            .background(kind.color.opacity(0.14), in: Capsule())
+            .lineLimit(1)
+            .fixedSize()
     }
 }
 

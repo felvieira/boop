@@ -51,7 +51,40 @@ export interface Event {
   silence_id?: string
   actions?: EventAction[]
   group?: GroupInfo
+  kind: EventKind
 }
+
+/** Business kind the server derives from each event; order is display order. */
+export const EVENT_KINDS = ['sale', 'renewal', 'trial', 'signup', 'lead', 'payment_failed', 'cancellation', 'refund', 'error', 'other'] as const
+export type EventKind = (typeof EVENT_KINDS)[number]
+export type KindCounts = Record<EventKind, number>
+/** Declared amounts in hundredths by currency and kind: `{BRL: {sale: 14990}}`. */
+export type Revenue = Record<string, Partial<Record<EventKind, number>>>
+
+export interface StatsWindow {
+  since?: string
+  until?: string
+  total: number
+  kinds: KindCounts
+  revenue_cents?: Revenue
+}
+
+export interface ProjectStats {
+  project_id: string
+  project_name: string
+  project_slug: string
+  project_icon: string
+  total: number
+  kinds: KindCounts
+  revenue_cents?: Revenue
+}
+
+export interface EventStats extends StatsWindow {
+  previous?: StatsWindow
+  projects: ProjectStats[]
+}
+
+export type EventFilters = { project?: string; level?: string; source?: string; kind?: string; since?: string; until?: string; silenced?: string }
 
 export type SilenceField = 'fingerprint' | 'title' | 'source'
 
@@ -68,6 +101,13 @@ export interface Silence {
 export interface EventPage {
   events: Event[]
   next_cursor?: string
+}
+
+function query(params: Record<string, string | number | boolean | undefined>): string {
+  const q = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '' && v !== false) q.set(k, String(v))
+  const qs = q.toString()
+  return qs ? '?' + qs : ''
 }
 
 export interface SupportTriageStatus {
@@ -448,12 +488,9 @@ export const api = {
   updateSettings: (patch: SettingsPatch) => request<Settings>('PATCH', '/api/v1/settings', patch),
   openRouterModels: () => request<{ models: OpenRouterModel[] }>('GET', '/api/v1/openrouter/models'),
 
-  events: (params: { project?: string; level?: string; source?: string; fingerprint?: string; before?: string; limit?: number; silenced?: string; grouped?: boolean } = {}) => {
-    const q = new URLSearchParams()
-    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '' && v !== false) q.set(k, String(v))
-    const qs = q.toString()
-    return request<EventPage>('GET', '/api/v1/events' + (qs ? '?' + qs : ''))
-  },
+  events: (params: EventFilters & { fingerprint?: string; before?: string; limit?: number; grouped?: boolean } = {}) =>
+    request<EventPage>('GET', '/api/v1/events' + query(params)),
+  eventStats: (params: EventFilters = {}) => request<EventStats>('GET', '/api/v1/events/stats' + query(params)),
   event: (id: string) => request<Event>('GET', `/api/v1/events/${encodeURIComponent(id)}`),
   eventDeliveries: (id: string) => request<{ deliveries: Delivery[] }>('GET', `/api/v1/events/${encodeURIComponent(id)}/deliveries`),
 

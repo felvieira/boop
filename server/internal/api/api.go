@@ -124,6 +124,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Reading events: device credential or the (unauthenticated) web UI.
 	mux.Handle("GET /api/v1/events", s.readerAuth(s.listEvents))
+	mux.Handle("GET /api/v1/events/stats", s.readerAuth(s.eventStats))
 	mux.Handle("GET /api/v1/events/{id}", s.readerAuth(s.getEvent))
 	mux.Handle("GET /api/v1/events/{id}/deliveries", s.readerAuth(s.eventDeliveries))
 	mux.Handle("GET /api/v1/events/stream", s.readerAuth(s.streamEvents))
@@ -1002,13 +1003,19 @@ func (s *Server) createEvent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"id": e.ID, "created_at": e.CreatedAt})
 }
 
-func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
+// eventFilter parses the list filters shared by listEvents and eventStats.
+// It writes the 422 itself and reports false on invalid input.
+func eventFilter(w http.ResponseWriter, r *http.Request) (events.Filter, bool) {
 	q := r.URL.Query()
 	f := events.Filter{ProjectID: q.Get("project"), Level: q.Get("level"), Source: q.Get("source"), Fingerprint: q.Get("fingerprint"), Before: q.Get("before"),
-		Since: q.Get("since"), Until: q.Get("until"), Grouped: q.Get("grouped") == "true" || q.Get("grouped") == "1"}
+		Kind: q.Get("kind"), Since: q.Get("since"), Until: q.Get("until"), Grouped: q.Get("grouped") == "true" || q.Get("grouped") == "1"}
 	if f.Level != "" && !levels.Valid(f.Level) {
 		writeError(w, http.StatusUnprocessableEntity, "invalid", "level must be one of "+strings.Join(levels.All, ", "))
-		return
+		return f, false
+	}
+	if f.Kind != "" && !events.ValidKind(f.Kind) {
+		writeError(w, http.StatusUnprocessableEntity, "invalid", "kind must be one of "+strings.Join(events.Kinds, ", "))
+		return f, false
 	}
 	if v := q.Get("silenced"); v != "" {
 		b := v == "true" || v == "1"
@@ -1018,9 +1025,17 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		n, err := strconv.Atoi(l)
 		if err != nil || n <= 0 {
 			writeError(w, http.StatusUnprocessableEntity, "invalid", "limit must be a positive integer")
-			return
+			return f, false
 		}
 		f.Limit = n
+	}
+	return f, true
+}
+
+func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
+	f, ok := eventFilter(w, r)
+	if !ok {
+		return
 	}
 	page, err := s.Events.List(r.Context(), f)
 	if err != nil {
@@ -1028,6 +1043,21 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, page)
+}
+
+// eventStats counts the events matching the list filters by kind and by
+// project, with the previous equally long window when since is given.
+func (s *Server) eventStats(w http.ResponseWriter, r *http.Request) {
+	f, ok := eventFilter(w, r)
+	if !ok {
+		return
+	}
+	stats, err := s.Events.Stats(r.Context(), f, time.Now())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
 }
 
 func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
