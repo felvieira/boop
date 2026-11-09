@@ -8,6 +8,7 @@ All notable changes to Boop are recorded here. The format follows [Keep a Change
 - **Big numbers by business kind.** Every event now carries a derived `kind`: `sale`, `renewal`, `trial`, `signup`, `lead`, `payment_failed`, `cancellation`, `refund`, `error` or `other`, matched from type, title and source (Portuguese and English keywords). The web and iOS inbox open with a count per kind for the last 24 hours, 7 days, 30 days or all time, with the change against the previous period coloured by whether it is good news; tapping a count filters the list. The web inbox adds a per-project breakdown whose cells drill into project + kind, and a **Kind** filter. Rows show a kind tag.
 - `GET /api/v1/events/stats` returns counts by kind and by project for the list filters, plus the previous equally long window when `since` is set. `GET /api/v1/events` accepts `kind`.
 - **Revenue in the big numbers.** Events that declare `data.amount` and a three-letter `data.currency` add up per kind and currency (`revenue_cents` in the stats response); the web and iOS inbox show the amount under each number and a **Net revenue** (sales + renewals − refunds), and the web per-project table gets a net revenue column.
+- `POST /api/v1/events` supports an optional project-scoped `Idempotency-Key` header. Identical retries return the original event without another push; mismatched payloads return 409.
 
 ### Changed
 - Label notification-based revenue as partial on web and iOS; older events without amounts cannot be included.

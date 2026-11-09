@@ -3,6 +3,7 @@ package events
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,9 @@ var ErrNotFound = errors.New("event not found")
 
 // ErrInvalid wraps validation failures.
 var ErrInvalid = errors.New("invalid event")
+
+// ErrIdempotencyConflict indicates a request key was reused with a different event.
+var ErrIdempotencyConflict = errors.New("idempotency key reused with different event")
 
 // Limits.
 const (
@@ -220,9 +224,32 @@ func Validate(in Input, r *redact.Redactor) (Input, []byte, error) {
 
 // Create validates, redacts and stores an event for projectID.
 func (s *Store) Create(ctx context.Context, projectID string, in Input, r *redact.Redactor) (Event, error) {
+	e, _, err := s.create(ctx, projectID, in, r, "")
+	return e, err
+}
+
+// CreateIdempotent atomically associates a request key with an event. Replays
+// return the original event and false; they must not trigger push delivery.
+func (s *Store) CreateIdempotent(ctx context.Context, projectID string, in Input, r *redact.Redactor, key string) (Event, bool, error) {
+	if len(key) == 0 || len(key) > 200 || strings.TrimSpace(key) != key {
+		return Event{}, false, fmt.Errorf("%w: idempotency key must be 1–200 characters without surrounding whitespace", ErrInvalid)
+	}
+	return s.create(ctx, projectID, in, r, key)
+}
+
+func (s *Store) create(ctx context.Context, projectID string, in Input, r *redact.Redactor, key string) (Event, bool, error) {
+	var requestHash string
+	if key != "" {
+		// Hash the received input before validation supplies a default timestamp.
+		raw, err := json.Marshal(in)
+		if err != nil {
+			return Event{}, false, err
+		}
+		requestHash = fmt.Sprintf("%x", sha256.Sum256(raw))
+	}
 	in, data, err := Validate(in, r)
 	if err != nil {
-		return Event{}, err
+		return Event{}, false, err
 	}
 	e := Event{
 		ID:          ids.New("evt"),
@@ -243,18 +270,53 @@ func (s *Store) Create(ctx context.Context, projectID string, in Input, r *redac
 	if len(e.Actions) > 0 {
 		b, err := json.Marshal(e.Actions)
 		if err != nil {
-			return Event{}, err
+			return Event{}, false, err
 		}
 		actionsJSON = string(b)
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO events
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Event{}, false, err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO events
 		(id, external_id, project_id, source, type, level, title, body, fingerprint, payload_json, actions_json, occurred_at, created_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		e.ID, nullable(e.ExternalID), e.ProjectID, e.Source, e.Type, e.Level, e.Title, e.Body, e.Fingerprint, string(e.Data), actionsJSON, e.OccurredAt, e.CreatedAt)
 	if err != nil {
-		return Event{}, err
+		return Event{}, false, err
 	}
-	return s.Get(ctx, e.ID)
+	if key != "" {
+		result, err := tx.ExecContext(ctx, `INSERT INTO event_idempotency (project_id, request_key, request_hash, event_id)
+			VALUES (?, ?, ?, ?) ON CONFLICT (project_id, request_key) DO NOTHING`, projectID, key, requestHash, e.ID)
+		if err != nil {
+			return Event{}, false, err
+		}
+		inserted, err := result.RowsAffected()
+		if err != nil {
+			return Event{}, false, err
+		}
+		if inserted == 0 {
+			var originalID, originalHash string
+			if err := tx.QueryRowContext(ctx, `SELECT event_id, request_hash FROM event_idempotency WHERE project_id = ? AND request_key = ?`, projectID, key).Scan(&originalID, &originalHash); err != nil {
+				return Event{}, false, err
+			}
+			if originalHash != requestHash {
+				return Event{}, false, ErrIdempotencyConflict
+			}
+			// Roll back the speculative event before querying through the pool.
+			if err := tx.Rollback(); err != nil {
+				return Event{}, false, err
+			}
+			original, err := s.Get(ctx, originalID)
+			return original, false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Event{}, false, err
+	}
+	created, err := s.Get(ctx, e.ID)
+	return created, true, err
 }
 
 var selectCols = `e.id, COALESCE(e.external_id, ''), e.project_id, p.name, p.slug, p.icon, e.source, e.type, e.level, e.title, e.body, e.fingerprint, e.payload_json, e.actions_json, e.occurred_at, e.created_at, COALESCE(e.silence_id, ''), ` + kindExpr("e")

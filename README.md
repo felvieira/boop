@@ -225,6 +225,8 @@ Each Sentry event becomes a Boop event: the exception `Type: value` (or the mess
 
 All endpoints are under `/api/v1` (except the Sentry envelope endpoint). Errors are JSON: `{"error": "code", "message": "..."}`.
 
+Event producers may send `Idempotency-Key` (1–200 characters) with `POST /api/v1/events`. The key is scoped to the project. A replay with the same payload returns the original event with HTTP 200 without sending another push; a different payload returns HTTP 409. A new event returns HTTP 201. Keys expire when their events are deleted by retention. Deploy support for this header before enabling retries in producers.
+
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | GET | `/health` | none | `{"status":"ok"}` |

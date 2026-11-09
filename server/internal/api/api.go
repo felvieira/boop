@@ -988,9 +988,24 @@ func (s *Server) createEvent(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &in) {
 		return
 	}
-	e, err := s.Events.Create(r.Context(), p.ID, in, s.redactor(r.Context()))
+	var e events.Event
+	created := true
+	var err error
+	if key := r.Header.Get("Idempotency-Key"); key != "" {
+		e, created, err = s.Events.CreateIdempotent(r.Context(), p.ID, in, s.redactor(r.Context()), key)
+	} else {
+		e, err = s.Events.Create(r.Context(), p.ID, in, s.redactor(r.Context()))
+	}
+	if errors.Is(err, events.ErrIdempotencyConflict) {
+		writeError(w, http.StatusConflict, "idempotency_conflict", err.Error())
+		return
+	}
 	if err != nil {
 		s.fail(w, err)
+		return
+	}
+	if !created {
+		writeJSON(w, http.StatusOK, map[string]string{"id": e.ID, "created_at": e.CreatedAt})
 		return
 	}
 	s.Log.Info("event.created", "event_id", e.ID, "project_id", p.ID, "event_level", e.Level)
